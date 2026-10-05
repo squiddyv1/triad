@@ -1,0 +1,22 @@
+# --- vendored upstream checkout (created by install.sh, never committed) -----
+/cairn/
+
+# --- runtime state and secrets ----------------------------------------------
+.env
+datas/
+*.db
+*.db-journal
+*.log
+
+# --- engagements / scan output ----------------------------------------------
+engagements/
+strix_runs/
+*.sarif
+
+# --- python ----------------------------------------------------------------
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+*.egg-info/

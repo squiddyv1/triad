@@ -1,0 +1,61 @@
+# Triad stack — Cairn server + dispatcher, with the Hermes control plane running
+# on the host (Hermes needs to be where its CLIs, gateway and skills live).
+#
+#   cp .env.example .env && make up
+#
+# Server API:      http://127.0.0.1:8000   (docs at /openapi.json)
+# Dispatcher:      reads dispatch.yaml, drives worker containers via /var/run/docker.sock
+# Data (SQLite):   ./datas/cairn/
+#
+# Scope-enforcement note: the dispatcher mounts the host docker socket, so worker
+# containers get host networking. If you need to *enforce* scope (not just ask for
+# it in the prompt), uncomment the egress proxy and point worker traffic at it
+# (see common_env in dispatch.yaml).
+
+services:
+  cairn-server:
+    build:
+      context: ./cairn
+      dockerfile: Dockerfile
+    image: triad-cairn-app
+    container_name: triad-cairn-server
+    ports:
+      - "${CAIRN_BIND:-0.0.0.0}:8000:8000"   # 0.0.0.0 = reachable from the host/LAN
+    volumes:
+      - ./datas/cairn/:/root/.local/share/cairn/
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/projects', timeout=5)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 5s
+    restart: unless-stopped
+    command: ["uv", "run", "cairn", "serve", "--host", "0.0.0.0", "--no-access-log"]
+
+  cairn-dispatcher:
+    build:
+      context: ./cairn
+      dockerfile: Dockerfile
+    image: triad-cairn-app
+    container_name: triad-cairn-dispatcher
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./dispatch.yaml:/cairn/dispatch.yaml:ro
+    depends_on:
+      cairn-server:
+        condition: service_healthy
+    restart: unless-stopped
+    command: ["uv", "run", "cairn", "dispatch", "--config", "dispatch.yaml"]
+
+  # --- optional: scope-enforcing egress proxy -----------------------------
+  # cairn-egress:
+  #   image: mitmproxy/mitmproxy:latest
+  #   container_name: triad-cairn-egress
+  #   command: ["mitmweb", "--listen-host", "0.0.0.0", "--listen-port", "8080",
+  #             "--scripts", "/scripts/scope.py", "--set", "connection_strategy=lazy"]
+  #   volumes:
+  #     - ./proxy:/scripts:ro
+  #   ports:
+  #     - "127.0.0.1:8081:8081"   # mitmweb UI
+  #   restart: unless-stopped

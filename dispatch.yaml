@@ -1,0 +1,78 @@
+# Triad dispatcher config (container mode).
+# Model routing follows the lesson from the campaign write-up: put the cheap model
+# on the high-volume `explore` loop, the strong model on `reason`/`bootstrap`
+# (the decision points), and keep the orchestrator (Hermes) on the strongest.
+
+server: "http://cairn-server:8000"
+
+# Merged into every worker container's environment. Uncomment to force all worker
+# egress through the scope-enforcing proxy (see docker-compose.yaml).
+common_env:
+  TSEC_SERVER_HOST: "cairn-server:8000"
+  TSEC_AGENT_TOKEN: "REPLACE_ME"
+  # https_proxy: "http://cairn-egress:8080"
+  # http_proxy:  "http://cairn-egress:8080"
+  # all_proxy:   "http://cairn-egress:8080"
+
+runtime:
+  interval: 3
+  max_workers: 8            # global concurrency ceiling
+  max_running_projects: 3   # cost guard: how many targets can burn in parallel
+  max_project_workers: 4    # no single target may monopolise the pool
+  healthcheck_timeout: 20
+  worker_healthcheck: "startup_only"
+  prompt_group: "default"
+
+tasks:
+  bootstrap:
+    timeout: 300
+    conclude_timeout: 90
+  reason:
+    timeout: 300
+    max_intents: 2          # cap fan-out so the graph does not explode
+  explore:
+    timeout: 300
+    conclude_timeout: 90
+
+container:
+  # NOTE: this image is linux/amd64 only. On an arm64 host either run local mode
+  # (dispatch.local.yaml) or add `platform: linux/amd64` + qemu emulation here.
+  image: "ghcr.io/oritera/cairn-worker-container:latest"
+  network_mode: "host"
+  completed_action: "stop"
+  # cap_add:                # only when a task genuinely needs raw packets
+  #   - "NET_RAW"
+
+workers:
+  # --- decision points: stronger model ------------------------------------
+  - name: "claude-reason-strong"
+    type: "claudecode"
+    task_types: [bootstrap, reason]
+    max_running: 1
+    priority: 0
+    env:
+      ANTHROPIC_MODEL: "deepseek-v4-pro"
+      ANTHROPIC_BASE_URL: "https://api.deepseek.com/anthropic"
+      ANTHROPIC_AUTH_TOKEN: "REPLACE_ME"
+
+  # --- high-volume exploration: cheap model -------------------------------
+  - name: "claude-explore-cheap"
+    type: "claudecode"
+    task_types: [explore]
+    max_running: 3
+    priority: 1
+    env:
+      ANTHROPIC_MODEL: "deepseek-v4.1-flash"
+      ANTHROPIC_BASE_URL: "https://api.deepseek.com/anthropic"
+      ANTHROPIC_AUTH_TOKEN: "REPLACE_ME"
+
+  # --- alternative backends (uncomment as needed) -------------------------
+  # - name: "codex-explore"
+  #   type: "codex"
+  #   task_types: [explore]
+  #   max_running: 2
+  #   priority: 2
+  #   env:
+  #     CODEX_MODEL: "qwen3.6-plus"
+  #     CODEX_BASE_URL: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+  #     OPENAI_API_KEY: "REPLACE_ME"

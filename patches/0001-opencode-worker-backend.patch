@@ -1,0 +1,389 @@
+diff --git a/cairn/src/cairn/dispatcher/config.py b/cairn/src/cairn/dispatcher/config.py
+index ff76161..29c1dba 100644
+--- a/cairn/src/cairn/dispatcher/config.py
++++ b/cairn/src/cairn/dispatcher/config.py
+@@ -11,7 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
+ 
+ 
+ TaskType = Literal["reason", "explore", "bootstrap"]
+-WorkerType = Literal["claudecode", "codex", "pi", "mock"]
++WorkerType = Literal["claudecode", "codex", "pi", "opencode", "mock"]
+ CompletedAction = Literal["remove", "stop"]
+ WorkerHealthcheckMode = Literal["startup_and_task", "startup_only", "disabled"]
+ ExecutionMode = Literal["container", "local"]
+@@ -34,6 +34,11 @@ WORKER_ENV_KEYS: dict[WorkerType, tuple[str, ...]] = {
+         "PI_API_KEY",
+         "PI_PROVIDER_API",
+     ),
++    "opencode": (
++        "OPENCODE_MODEL",
++        "OPENCODE_BASE_URL",
++        "OPENCODE_API_KEY",
++    ),
+     "mock": (),
+ }
+ 
+diff --git a/cairn/src/cairn/dispatcher/workers/adapters/__init__.py b/cairn/src/cairn/dispatcher/workers/adapters/__init__.py
+index 6fc1718..17eae79 100644
+--- a/cairn/src/cairn/dispatcher/workers/adapters/__init__.py
++++ b/cairn/src/cairn/dispatcher/workers/adapters/__init__.py
+@@ -1,6 +1,7 @@
+ from cairn.dispatcher.workers.adapters.claudecode import ClaudeCodeDriver
+ from cairn.dispatcher.workers.adapters.codex import CodexDriver
+ from cairn.dispatcher.workers.adapters.mock import MockDriver
++from cairn.dispatcher.workers.adapters.opencode import OpenCodeDriver
+ from cairn.dispatcher.workers.adapters.pi import PiDriver
+ 
+-__all__ = ["ClaudeCodeDriver", "CodexDriver", "PiDriver", "MockDriver"]
++__all__ = ["ClaudeCodeDriver", "CodexDriver", "PiDriver", "MockDriver", "OpenCodeDriver"]
+diff --git a/cairn/src/cairn/dispatcher/workers/adapters/opencode.py b/cairn/src/cairn/dispatcher/workers/adapters/opencode.py
+new file mode 100644
+index 0000000..2d6a1c4
+--- /dev/null
++++ b/cairn/src/cairn/dispatcher/workers/adapters/opencode.py
+@@ -0,0 +1,175 @@
++"""OpenCode worker driver.
++
++Adds `type: opencode` as a Cairn worker backend, so the dispatcher can reuse a
++host `opencode` CLI (and its already-configured providers) instead of requiring
++Claude Code, Codex or Pi.
++
++Why this exists: on hosts where only opencode is installed and authenticated,
++none of the shipped backends can run — the whole exploitation layer is blocked.
++opencode is OpenAI-compatible, speaks JSON events, and supports session
++continuation, which is all the worker protocol needs.
++
++Verified against opencode 1.18.34, local execution mode:
++  opencode run --format json [--model provider/model] [-s SESSION] [--auto] "<prompt>"
++  -> JSONL events on stdout, e.g.
++     {"type":"step_start","sessionID":"ses_..."}
++     {"type":"text","part":{"type":"text","text":"{...}"}}
++     {"type":"step_finish","part":{"tokens":{...},"cost":0.0017}}
++
++Env keys (per worker):
++  OPENCODE_MODEL          provider/model for --model, e.g. opencode-go/deepseek-v4.1-flash
++                          (optional in local mode: omit to use the host default model)
++  OPENCODE_AGENT          agent name for --agent, e.g. build
++  OPENCODE_AUTO           "1" (default) -> pass --auto so headless runs can use tools.
++                          Set "0" to leave permission prompts in place.
++  OPENCODE_BASE_URL       OpenAI-compatible base URL (container mode / health check)
++  OPENCODE_API_KEY        bearer token for that base URL
++  OPENCODE_EXTRA_HEADERS  JSON object; "$SESSION" is replaced with a fresh uuid per
++                          invocation, e.g. {"x-opencode-session":"$SESSION"}
++  OPENCODE_CONFIG_CONTENT_JSON
++                          Container mode only: exact OPENCODE_CONFIG_CONTENT to export,
++                          for images that need a provider injected. Deliberately not
++                          synthesised here — the provider-config schema varies by
++                          opencode version, and guessing it silently breaks runs.
++
++Container mode is *not* verified on this machine: Cairn's worker image does not
++ship opencode, so container deployments must either install it in a derived image
++or use local mode (recommended on arm64, where that image is unavailable anyway).
++"""
++
++from __future__ import annotations
++
++import json
++import uuid
++from typing import Any
++
++from cairn.dispatcher.config import WorkerConfig
++from cairn.dispatcher.workers.base import DriverResult, WorkerDriver
++from cairn.dispatcher.workers.health import HealthResult, http_ping, proxies_from_env
++
++
++class OpenCodeDriver(WorkerDriver):
++    type_name = "opencode"
++
++    def __init__(self, local: bool = False):
++        self.local = local
++
++    def local_binary(self) -> str | None:
++        return "opencode"
++
++    # ---- health ----------------------------------------------------------
++    def check_health(self, worker: WorkerConfig, *, timeout: float) -> HealthResult:
++        env = worker.env
++        base = env["OPENCODE_BASE_URL"].rstrip("/")
++        api_model = self._api_model(env["OPENCODE_MODEL"])
++        headers = {
++            "Authorization": f"Bearer {env['OPENCODE_API_KEY']}",
++            "content-type": "application/json",
++            **self._extra_headers(env),
++        }
++        return http_ping(
++            f"{base}/chat/completions",
++            headers=headers,
++            json_body={"model": api_model, "max_tokens": 10,
++                       "messages": [{"role": "user", "content": "ping"}]},
++            timeout=timeout,
++            proxies=proxies_from_env(env),
++        )
++
++    def describe_health(self, worker: WorkerConfig) -> str:
++        env = worker.env
++        return f"POST {env['OPENCODE_BASE_URL']}/chat/completions (model={env['OPENCODE_MODEL']})"
++
++    # ---- argv ------------------------------------------------------------
++    def build_execute(self, worker: WorkerConfig, prompt: str, session: str | None) -> DriverResult:
++        return DriverResult(argv=self._argv(worker, prompt, session), session=session)
++
++    def build_conclude(self, worker: WorkerConfig, prompt: str, session: str) -> list[str]:
++        return self._argv(worker, prompt, session)
++
++    def _argv(self, worker: WorkerConfig, prompt: str, session: str | None) -> list[str]:
++        env = worker.env
++        # The binary is part of argv in BOTH modes: local mode execs this command
++        # verbatim, and container mode prepends its own wrapper around it.
++        # (Omitting it fails with `FileNotFoundError: 'run'` at task time.)
++        argv = ["opencode", "run", "--format", "json"]
++        model = (env.get("OPENCODE_MODEL") or "").strip()
++        if model:
++            argv += ["--model", model]
++        agent = (env.get("OPENCODE_AGENT") or "").strip()
++        if agent:
++            argv += ["--agent", agent]
++        if env.get("OPENCODE_AUTO", "1") != "0":
++            argv += ["--auto"]
++        if session:
++            argv += ["-s", session]
++        argv.append(prompt)
++
++        config = (env.get("OPENCODE_CONFIG_CONTENT_JSON") or "").strip()
++        if config and not self.local:
++            # Export the caller-supplied config, then exec the real CLI.
++            script = 'export OPENCODE_CONFIG_CONTENT="$1"\nshift\nexec opencode "$@"\n'
++            return ["/bin/sh", "-lc", script, "--", config, *argv]
++        return argv
++
++    # ---- output parsing --------------------------------------------------
++    def extract_session(self, session: str | None, stdout: str, stderr: str) -> str | None:
++        if session:
++            return session
++        for event in self._iter_events(stdout):
++            session_id = event.get("sessionID")
++            if isinstance(session_id, str) and session_id:
++                return session_id
++        return None
++
++    def extract_response_text(self, stdout: str, stderr: str) -> str:
++        parts: list[str] = []
++        for event in self._iter_events(stdout):
++            if event.get("type") != "text":
++                continue
++            part = event.get("part")
++            if not isinstance(part, dict) or part.get("type") != "text":
++                continue
++            text = part.get("text")
++            if isinstance(text, str) and text.strip():
++                parts.append(text)
++        if parts:
++            return "\n".join(parts)
++        # No parsed events: pydantic-free fallback so the dispatcher's own
++        # JSON extractor still gets a chance at raw stdout.
++        return stdout
++
++    @staticmethod
++    def _iter_events(stdout: str) -> list[dict[str, Any]]:
++        events: list[dict[str, Any]] = []
++        for line in stdout.splitlines():
++            line = line.strip()
++            if not line:
++                continue
++            try:
++                payload = json.loads(line)
++            except json.JSONDecodeError:
++                continue
++            if isinstance(payload, dict):
++                events.append(payload)
++        return events
++
++    # ---- helpers ---------------------------------------------------------
++    @staticmethod
++    def _api_model(model: str) -> str:
++        """`provider/model` (opencode id) -> `model` (wire id)."""
++        return model.split("/", 1)[1] if "/" in model else model
++
++    @staticmethod
++    def _extra_headers(env: dict[str, str]) -> dict[str, str]:
++        raw = (env.get("OPENCODE_EXTRA_HEADERS") or "").strip()
++        if not raw:
++            return {}
++        try:
++            parsed = json.loads(raw)
++        except json.JSONDecodeError:
++            return {}
++        if not isinstance(parsed, dict):
++            return {}
++        session = str(uuid.uuid4())
++        return {str(k): str(v).replace("$SESSION", session) for k, v in parsed.items()}
+diff --git a/cairn/src/cairn/dispatcher/workers/registry.py b/cairn/src/cairn/dispatcher/workers/registry.py
+index 9d1f371..2428d1c 100644
+--- a/cairn/src/cairn/dispatcher/workers/registry.py
++++ b/cairn/src/cairn/dispatcher/workers/registry.py
+@@ -1,6 +1,12 @@
+ from __future__ import annotations
+ 
+-from cairn.dispatcher.workers.adapters import ClaudeCodeDriver, CodexDriver, MockDriver, PiDriver
++from cairn.dispatcher.workers.adapters import (
++    ClaudeCodeDriver,
++    CodexDriver,
++    MockDriver,
++    OpenCodeDriver,
++    PiDriver,
++)
+ from cairn.dispatcher.workers.base import WorkerDriver
+ 
+ 
+@@ -11,6 +17,7 @@ DRIVERS: dict[str, WorkerDriver] = {
+     "claudecode": _CLAUDE,
+     "codex": CodexDriver(),
+     "pi": PiDriver(),
++    "opencode": OpenCodeDriver(),
+     "mock": _MOCK,
+ }
+ 
+@@ -20,6 +27,7 @@ LOCAL_DRIVERS: dict[str, WorkerDriver] = {
+     "claudecode": _CLAUDE,
+     "codex": CodexDriver(local=True),
+     "pi": PiDriver(local=True),
++    "opencode": OpenCodeDriver(local=True),
+     "mock": _MOCK,
+ }
+ 
+diff --git a/cairn/tests/test_opencode_adapter.py b/cairn/tests/test_opencode_adapter.py
+new file mode 100644
+index 0000000..24da687
+--- /dev/null
++++ b/cairn/tests/test_opencode_adapter.py
+@@ -0,0 +1,130 @@
++"""Tests for the opencode worker backend added by this repo.
++
++Upstream Cairn ships claudecode / codex / pi / mock. The opencode driver exists so
++a host with only the opencode CLI (no claude/codex/pi) can still run workers.
++"""
++
++from __future__ import annotations
++
++import json
++
++import pytest
++from pydantic import ValidationError
++
++from cairn.dispatcher.config import DispatchConfig
++from cairn.dispatcher.workers.adapters.opencode import OpenCodeDriver
++from cairn.dispatcher.workers.registry import DRIVERS, LOCAL_DRIVERS, get_driver
++
++from conftest import make_config
++
++OPENCODE_ENV = {
++    "OPENCODE_MODEL": "opencode-go/deepseek-v4.1-flash",
++    "OPENCODE_BASE_URL": "https://gateway.example/v1",
++    "OPENCODE_API_KEY": "secret",
++}
++
++
++def _worker(**env_overrides):
++    from cairn.dispatcher.config import WorkerConfig
++
++    return WorkerConfig.model_validate({
++        "name": "oc",
++        "type": "opencode",
++        "task_types": ["bootstrap", "reason", "explore"],
++        "max_running": 1,
++        "priority": 0,
++        "env": {**OPENCODE_ENV, **env_overrides},
++    })
++
++
++def test_opencode_is_registered_in_both_execution_modes() -> None:
++    assert "opencode" in DRIVERS
++    assert "opencode" in LOCAL_DRIVERS
++    assert isinstance(get_driver("opencode", "local"), OpenCodeDriver)
++    assert get_driver("opencode", "local").local_binary() == "opencode"
++
++
++def test_opencode_execute_argv_carries_model_json_format_and_prompt() -> None:
++    argv = OpenCodeDriver().build_execute(_worker(), "# Task\nbody", None).argv
++
++    assert argv[:4] == ["opencode", "run", "--format", "json"]
++    assert argv[argv.index("--model") + 1] == "opencode-go/deepseek-v4.1-flash"
++    assert "--auto" in argv          # headless: workers must be able to use tools
++    assert argv[-1] == "# Task\nbody"
++    assert "-s" not in argv          # no session on the first call
++
++
++def test_opencode_auto_can_be_disabled_and_session_is_continued() -> None:
++    argv = OpenCodeDriver().build_execute(_worker(OPENCODE_AUTO="0"), "p", None).argv
++    assert "--auto" not in argv
++
++    argv = OpenCodeDriver().build_conclude(_worker(), "p", "ses_123")
++    assert argv[argv.index("-s") + 1] == "ses_123"
++    assert argv[-1] == "p"
++
++
++def test_opencode_agent_flag_is_optional() -> None:
++    assert "--agent" not in OpenCodeDriver().build_execute(_worker(), "p", None).argv
++    argv = OpenCodeDriver().build_execute(_worker(OPENCODE_AGENT="build"), "p", None).argv
++    assert argv[argv.index("--agent") + 1] == "build"
++
++
++def test_opencode_parses_session_id_and_text_events() -> None:
++    stdout = "\n".join([
++        json.dumps({"type": "step_start", "sessionID": "ses_abc", "part": {}}),
++        json.dumps({"type": "text", "sessionID": "ses_abc",
++                    "part": {"type": "text", "text": '{"accepted":true}'}}),
++        json.dumps({"type": "step_finish", "sessionID": "ses_abc",
++                    "part": {"tokens": {"total": 12}, "cost": 0.01}}),
++        "not json at all",
++    ])
++
++    driver = OpenCodeDriver()
++    assert driver.extract_session(None, stdout, "") == "ses_abc"
++    assert driver.extract_session("ses_keep", stdout, "") == "ses_keep"
++    assert driver.extract_response_text(stdout, "") == '{"accepted":true}'
++    # Unparseable output must fall through to the raw text, not vanish.
++    assert driver.extract_response_text("plain text", "") == "plain text"
++
++
++def test_opencode_extra_headers_mint_a_fresh_session_per_call() -> None:
++    driver = OpenCodeDriver()
++    env = {"OPENCODE_EXTRA_HEADERS": '{"x-session":"$SESSION","UA":"oc"}'}
++
++    first = driver._extra_headers(env)
++    second = driver._extra_headers(env)
++
++    assert first["UA"] == "oc"
++    assert first["x-session"] != "$SESSION"
++    assert first["x-session"] != second["x-session"]
++    assert driver._extra_headers({"OPENCODE_EXTRA_HEADERS": "not json"}) == {}
++
++
++def test_opencode_wire_model_strips_the_provider_prefix() -> None:
++    driver = OpenCodeDriver()
++    assert driver._api_model("opencode-go/deepseek-v4.1-flash") == "deepseek-v4.1-flash"
++    assert driver._api_model("bare-model") == "bare-model"
++
++
++def test_opencode_container_mode_requires_llm_env_keys() -> None:
++    payload = make_config().model_dump()
++    payload["workers"] = [{
++        "name": "oc", "type": "opencode", "task_types": ["explore"],
++        "max_running": 1, "priority": 0,
++        "env": {"OPENCODE_MODEL": "m"},          # base URL + key missing
++    }]
++
++    with pytest.raises(ValidationError, match="missing env keys"):
++        DispatchConfig.model_validate(payload)
++
++
++def test_opencode_local_mode_needs_no_llm_env_keys() -> None:
++    payload = make_config().model_dump()
++    payload["runtime"]["execution"] = "local"
++    payload["workers"] = [{
++        "name": "oc", "type": "opencode", "task_types": ["explore"],
++        "max_running": 1, "priority": 0, "env": {},
++    }]
++
++    config = DispatchConfig.model_validate(payload)
++    assert config.workers[0].type == "opencode"

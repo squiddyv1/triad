@@ -1,0 +1,42 @@
+MIT License
+
+Copyright (c) 2026 Triad contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+---
+
+## Third-party components
+
+This repository contains no third-party code. It *drives* three external projects,
+each under its own license, and `install.sh` clones one of them for you:
+
+- **Cairn** — https://github.com/oritera/Cairn — **AGPL-3.0**.
+  Free for personal and educational use. Commercial or proprietary use requires a
+  commercial license from its author. `patches/0001-opencode-worker-backend.patch`
+  is a modification to Cairn and is therefore distributed under the same terms as
+  the file it patches. If you redistribute a patched Cairn, the AGPL applies to it.
+- **Strix** — https://github.com/usestrix/strix — **Apache-2.0**. Installed
+  separately; not bundled here.
+- **Hermes Agent** — https://github.com/NousResearch/hermes-agent — see its
+  repository for licensing. Loads the plugin in `hermes/plugin-triad/`, which is
+  MIT as above.
+
+Nothing in this repository is malware, and nothing here was written to target
+systems without authorization. See the Authorization section of README.md.

@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://triad.local/contracts/finding.schema.json",
+  "title": "Triad handoff contract",
+  "description": "The layer-to-layer object. Discovery produces these; exploitation consumes them; orchestration stores them. Keep it machine-readable - a prose blob forces the execution layer to re-interpret, which is where unsafe actions come from.",
+  "type": "object",
+  "required": ["source_tool", "target", "title"],
+  "properties": {
+    "id":           {"type": ["string", "null"], "description": "Stable id from the producing tool"},
+    "source_tool":  {"enum": ["strix", "cairn", "manual"]},
+    "run_id":       {"type": ["string", "null"], "description": "Which run produced it"},
+    "target":       {"type": "string",  "description": "Target identity: URL/host/asset"},
+    "title":        {"type": "string"},
+    "vuln_class":   {"type": ["string", "null"], "description": "CWE/OWASP/category"},
+    "severity":     {"enum": ["critical", "high", "medium", "low", "info", null]},
+    "cvss":         {"type": ["number", "string", "null"]},
+    "confidence":   {"type": ["string", "number", "null"], "description": "How sure the producer is"},
+    "description":  {"type": ["string", "null"]},
+    "evidence":     {"type": ["string", "null"], "description": "PoC / request / response / file ref"},
+    "prerequisites":{"type": "array", "items": {"type": "string"}, "description": "What must be true before acting"},
+    "recommended_next_action": {"type": ["string", "null"]},
+    "risk_level":   {"enum": ["read_only", "state_change", "destructive", null],
+                     "description": "What executing this does to the target. 'destructive' requires human approval."},
+    "scope_limits": {"type": "array", "items": {"type": "string"},
+                     "description": "Hosts/paths that must NOT be touched"},
+    "expected_side_effects": {"type": "array", "items": {"type": "string"}},
+    "provenance":   {"type": ["string", "null"], "description": "Where this came from, chain"},
+    "timestamp":    {"type": ["string", "null"], "format": "date-time"}
+  },
+  "additionalProperties": true
+}

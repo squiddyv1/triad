@@ -1,0 +1,67 @@
+# Triad dispatcher config — LOCAL MODE (no Docker, arm64-friendly).
+#
+# Use this instead of dispatch.yaml when:
+#   * the host is arm64 and the amd64-only worker image is impractical, or
+#   * you already have a worker CLI installed and logged in on the host.
+#
+# Workers run with your user's permissions and NO SANDBOX — only run this on a
+# machine you are authorized to operate from, on a network you control.
+#
+#   uv run --project cairn cairn serve                                   # terminal 1
+#   uv run --project cairn cairn dispatch --config dispatch.local.yaml   # terminal 2
+#
+# The `opencode` backend is provided by this repo (workers/adapters/opencode.py),
+# not by upstream Cairn: it lets the dispatcher reuse a host opencode CLI when
+# none of claudecode / codex / pi is installed.
+
+server: "http://127.0.0.1:8000"
+
+runtime:
+  execution: local
+  worker_healthcheck: disabled
+  max_workers: 3
+  max_running_projects: 2
+  max_project_workers: 2
+  interval: 3
+  healthcheck_timeout: 15
+  prompt_group: "default"
+
+tasks:
+  bootstrap: {timeout: 300, conclude_timeout: 60}
+  reason:    {timeout: 240, max_intents: 2}
+  explore:   {timeout: 600, conclude_timeout: 120}
+
+local:
+  workspace_root: "~/engagements/cairn-runs"
+  completed_action: keep
+  # Scope enforcement: force all worker egress through your proxy.
+  # common_env:
+  #   https_proxy: "http://127.0.0.1:8080"
+  #   http_proxy:  "http://127.0.0.1:8080"
+
+workers:
+  # opencode reusing the host's already-configured providers (OpenCode Go here).
+  # No API keys in this file: local mode inherits the host CLI config.
+  - name: "local-opencode"
+    type: "opencode"
+    task_types: [bootstrap, reason, explore]
+    max_running: 2
+    priority: 0
+    env:
+      OPENCODE_MODEL: "opencode-go/deepseek-v4.1-flash"
+      OPENCODE_AUTO: "1"          # headless: let the worker use its tools
+      # OPENCODE_AGENT: "build"
+
+  # Uncomment if you install one of the upstream backends:
+  # - name: "local-claude"
+  #   type: "claudecode"
+  #   task_types: [bootstrap, reason, explore]
+  #   max_running: 1
+  #   priority: 1
+
+  # Deterministic worker for testing the dispatcher loop with no LLM at all:
+  # - name: "local-mock"
+  #   type: "mock"
+  #   task_types: [bootstrap, reason, explore]
+  #   max_running: 2
+  #   priority: 9

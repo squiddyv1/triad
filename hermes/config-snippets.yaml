@@ -1,0 +1,42 @@
+# Hermes wiring — paste the relevant blocks into ~/.hermes/config.yaml
+# (or let `hermes` write them: `hermes mcp add ...`). Restart Hermes after adding
+# MCP servers — connections are discovered at startup, there is no hot reload.
+
+# 1) Cairn as an MCP server, so its graph ops are first-class Hermes tools.
+mcp_servers:
+  cairn:
+    command: "uv"
+    args: ["run", "--with", "mcp<2", "cairn_mcp.py"]
+    # run from the mcp/ directory, or use an absolute path:
+    # args: ["run", "--with", "mcp<2", "/abs/path/triad/mcp/cairn_mcp.py"]
+    env:
+      CAIRN_BASE_URL: "http://127.0.0.1:8000"
+    timeout: 60
+    connect_timeout: 30
+
+# Tools arrive as mcp_cairn_* (e.g. mcp_cairn_cairn_get_project).
+# If you want the agent to see only the safe read surface, filter:
+#   tools:
+#     include: ["cairn_list_projects", "cairn_get_project", "cairn_export", "cairn_goal_path"]
+
+# 2) A nightly re-scan. Hermes cron jobs can attach skills; this one loads the
+#    engagement skill and works through the loop.
+#    crontab expression is in the host's local time (WIB on this machine).
+#
+# cronjob:
+#   - name: triad-nightly
+#     schedule: "0 2 * * *"
+#     skills: [triad-engagement]
+#     prompt: >-
+#       For every active engagement in ~/engagements, check cairn_list for stalled
+#       projects (no new facts since the last run), then strix_scan any target whose
+#       last scan is older than 7 days, feed results with triad_feed, and post a
+#       digest of new facts and coverage gaps.
+
+# 3) Approval gate: exploit actions require a human reply in the gateway.
+#    Keep the kill switch one message away.
+#
+# gateway:
+#   platforms:
+#     telegram:
+#       enabled: true

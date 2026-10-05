@@ -1,0 +1,37 @@
+name: triad
+version: 1.0.0
+manifest_version: 2
+api_version: 1
+description: >-
+  Unified control plane for automated security assessment: Strix for discovery,
+  Cairn for exploitation search, Hermes for orchestration. Exposes both engines
+  as first-class tools.
+author: Gurnita
+license: MIT
+homepage: https://github.com/oritera/Cairn
+tags: [security, pentest, strix, cairn, orchestration]
+provides_tools:
+  - cairn_list
+  - cairn_create
+  - cairn_graph
+  - cairn_hint
+  - cairn_intent
+  - cairn_complete
+  - cairn_reopen
+  - cairn_status
+  - strix_scan
+  - strix_findings
+  - triad_feed
+provides_hooks:
+  - post_tool_call
+config_schema:
+  cairn_url:
+    type: str
+    default: "http://127.0.0.1:8000"
+    description: "Base URL of the Cairn server"
+    required: false
+  engagement_dir:
+    type: str
+    default: "~/engagements"
+    description: "Where strix_runs/ and engagement notes live"
+    required: false
