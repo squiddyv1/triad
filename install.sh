@@ -569,20 +569,21 @@ esac
 # Done.
 hdr "Next steps"
 cat <<EOF
-  1. Fill in API keys:            \$EDITOR $TRIAD_HOME/.env
-  2. Start Cairn:                 cd $TRIAD_HOME && make up        # or: docker compose up -d
-  3. Start the dispatcher:        cd $CAIRN_DIR && \\
-       uv run --project cairn cairn dispatch --config $TRIAD_HOME/dispatch.local.yaml
-  4. Run the flow:                triad engage --title ... --target ... --goal ...
-                                  (or: ./triad.py --help)
+  1. Set it up:                   triad setup
+                                  prompts for API keys, writes .env, then starts
+                                  Cairn and the dispatcher and waits for health
+  2. Run an engagement:           triad engage --title ACME --target https://app.example \\
+                                       --goal "conclude or rule out every finding in scope" \\
+                                       --roe $TRIAD_HOME/contracts/roe-instructions.md
+  3. Later:                       triad status | triad up | triad down
 EOF
 if hermes_present; then
   cat <<EOF
-  5. Optional: restart Hermes so the plugin + MCP tools load, then talk to it.
+  4. Optional: restart Hermes so the plugin + MCP tools load, then talk to it.
 EOF
 else
   cat <<EOF
-  5. Hermes is not installed and is not needed. To add the optional control
+  4. Hermes is not installed and is not needed. To add the optional control
      plane later: ./install.sh --with-hermes
 EOF
 fi

@@ -147,15 +147,26 @@ Every path is overridable, so nothing is machine-specific:
 ## Run it
 
 ```bash
-$EDITOR .env                       # LLM keys
-make bootstrap                     # pulls the worker image, checks the stack
-make up                            # Cairn server: http://127.0.0.1:8000
+triad setup      # wizard: API keys -> .env, then starts the stack
+```
 
-cd cairn && uv run --project cairn cairn dispatch --config ../dispatch.local.yaml
+`triad setup` asks which model Strix should drive and for the key, writes `.env`
+(mode 600, comments preserved), then starts the Cairn server, starts the
+dispatcher, waits for the Cairn API to answer and prints what to run next. Bare
+`triad` does the same on an unconfigured checkout, and otherwise reports where
+things stand. Each step is also available on its own:
+
+```bash
+triad up         # start the Cairn server and the dispatcher
+triad down       # stop them (data is kept); --keep-server stops only the dispatcher
+triad status     # list projects, or one graph with --project
 ```
 
 The server and the dispatcher are **separate processes**, and a project will not
-move until the dispatcher is running.
+move until the dispatcher is running. `triad up` runs the dispatcher on the host,
+which is the path verified end to end here; `--container` uses the compose
+dispatcher instead, which needs the amd64-only worker image. Runtime pids and logs
+live in `.triad/`, so a dispatcher that refuses to start says why in its log.
 
 Drive it headlessly. This is the normal flow, and it needs no Hermes:
 

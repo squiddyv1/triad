@@ -3,6 +3,7 @@
 
 # --- runtime state and secrets ----------------------------------------------
 .env
+.triad/
 datas/
 *.db
 *.db-journal
