@@ -155,23 +155,83 @@ as_root() {
   fi
 }
 
-# Distro route. Package names differ per family, so the list is explicit.
-pkg_docker() {
-  local pm pkgs
-  if   have apt-get; then pm="apt-get"; pkgs="docker.io docker-compose-v2"
-  elif have dnf;     then pm="dnf";     pkgs="docker docker-compose-plugin"
-  elif have yum;     then pm="yum";     pkgs="docker docker-compose-plugin"
-  elif have zypper;  then pm="zypper";  pkgs="docker docker-compose"
-  elif have pacman;  then pm="pacman";  pkgs="docker docker-compose"
-  else return 127
-  fi
-  echo "    $pm install $pkgs"
-  case "$pm" in
-    apt-get) as_root apt-get update -qq && as_root apt-get install -y $pkgs ;;
-    zypper)  as_root zypper --non-interactive install $pkgs ;;
-    pacman)  as_root pacman -S --noconfirm $pkgs ;;
-    *)       as_root "$pm" install -y $pkgs ;;
+# Docker publishes packages only for the distros below. On a derivative (Kali,
+# Parrot, Mint, Pop) get.docker.com takes its "*)" branch: it maps the distro to
+# debian but keeps VERSION_ID as the version, so it asks for `debian kali-rolling`,
+# which has no Release file. That also leaves an apt source behind which breaks
+# every later apt call, so the route is picked up front.
+DOCKER_OFFICIAL_IDS="debian ubuntu raspbian fedora centos rhel rocky almalinux amzn sles opensuse-leap opensuse-tumbleweed"
+DOCKER_APT_LIST="${DOCKER_APT_LIST:-/etc/apt/sources.list.d/docker.list}"
+
+os_release_id() {
+  local f="${OS_RELEASE_FILE:-/etc/os-release}"
+  if [ ! -r "$f" ]; then return 1; fi
+  ( . "$f" 2>/dev/null; echo "${ID:-}" )
+}
+
+docker_official_ok() {
+  local id
+  id="$(os_release_id)" || return 1
+  if [ -z "$id" ]; then return 1; fi
+  case " $DOCKER_OFFICIAL_IDS " in
+    *" $id "*) return 0 ;;
+    *)         return 1 ;;
   esac
+}
+
+# An existing docker.list whose suite Docker never published breaks apt with
+# "does not have a Release file". Remove exactly that entry, and only that.
+docker_apt_repair() {
+  if [ ! -r "$DOCKER_APT_LIST" ]; then return 0; fi
+  local suite
+  suite="$(awk '{for(i=1;i<=NF;i++) if ($i ~ /^https?:/) {print $(i+1); exit}}' "$DOCKER_APT_LIST")"
+  case "$suite" in
+    *kali*|*parrot*|*mint*|*pop*|*elementary*)
+      warn "removing an unusable Docker apt source: $DOCKER_APT_LIST (suite '$suite' does not exist)"
+      as_root rm -f "$DOCKER_APT_LIST" || return 1
+      as_root apt-get update -qq >/dev/null 2>&1 || true
+      ok "apt works again; using the distro's own packages instead"
+      ;;
+  esac
+  return 0
+}
+
+# Distro route, which is the documented one on derivatives. Package names differ
+# per family, so each case is explicit. docker.io is the engine on Debian-likes:
+# Kali's own `docker` package is unrelated to containers, so it is never used.
+pkg_docker() {
+  if have apt-get; then
+    as_root apt-get update -qq
+    echo "    apt-get install docker.io"
+    as_root apt-get install -y docker.io || return 1
+    # compose v2, whatever this release calls it. Optional here: ensure_compose
+    # retries, and Cairn's local mode works without it.
+    as_root apt-get install -y docker-compose-v2 >/dev/null 2>&1 \
+      || as_root apt-get install -y docker-compose-plugin >/dev/null 2>&1 \
+      || as_root apt-get install -y docker-compose >/dev/null 2>&1 || true
+    return 0
+  fi
+  if have dnf; then
+    echo "    dnf install moby-engine docker-compose-plugin"
+    as_root dnf install -y moby-engine docker-compose-plugin || return 1
+    return 0
+  fi
+  if have yum; then
+    echo "    yum install docker docker-compose-plugin"
+    as_root yum install -y docker docker-compose-plugin || return 1
+    return 0
+  fi
+  if have zypper; then
+    echo "    zypper install docker docker-compose"
+    as_root zypper --non-interactive install docker docker-compose || return 1
+    return 0
+  fi
+  if have pacman; then
+    echo "    pacman -S docker docker-compose"
+    as_root pacman -S --noconfirm docker docker-compose || return 1
+    return 0
+  fi
+  return 127
 }
 
 # The vendor script runs as root. Fetched to a temp file and hashed first, same
@@ -238,18 +298,19 @@ ensure_docker() {
     warn "docker is installed but the daemon is not reachable; starting it"
     start_docker_daemon || warn "could not start the docker daemon automatically"
   else
+    local use_official=0
     case "$method" in
       official)
-        echo "  installing Docker using the command its docs publish"
-        docker_script_install || { err "Docker install failed"; return 1; }
-        ;;
-      pkg)
-        echo "  installing Docker from the distro package manager"
-        if ! pkg_docker; then
-          warn "the package manager route failed; falling back to the vendor script"
-          docker_script_install || { err "Docker install failed"; return 1; }
+        if docker_official_ok; then
+          use_official=1
+        else
+          warn "Docker publishes no packages for '$(os_release_id)'"
+          warn "  its installer would request a suite that does not exist, so the"
+          warn "  distro's own docker.io is used instead (the documented route there)"
+          docker_apt_repair || true
         fi
         ;;
+      pkg)  : ;;
       none)
         warn "docker is missing and installation is disabled ($method)"
         warn "  install it yourself: https://docs.docker.com/engine/install/"
@@ -257,6 +318,33 @@ ensure_docker() {
         ;;
       *) err "unknown install method '$method' (use official, pkg or none)"; return 2 ;;
     esac
+
+    if [ "$use_official" = 1 ]; then
+      echo "  installing Docker using the command its docs publish"
+      # Remember whether the apt source existed, so a failed attempt can clean up
+      # after itself without touching a source the user already had.
+      local list_before=0
+      if [ -e "$DOCKER_APT_LIST" ]; then list_before=1; fi
+      if ! docker_script_install; then
+        if [ "$list_before" = 0 ] && [ -e "$DOCKER_APT_LIST" ]; then
+          warn "removing the apt source the failed install left behind ($DOCKER_APT_LIST)"
+          as_root rm -f "$DOCKER_APT_LIST" || true
+          as_root apt-get update -qq >/dev/null 2>&1 || true
+        fi
+        warn "the official route failed; falling back to the distro's own packages"
+        pkg_docker || { err "Docker install failed on both routes"; return 1; }
+      fi
+    else
+      echo "  installing Docker from the distro package manager"
+      if ! pkg_docker; then
+        warn "the package manager route failed; falling back to the vendor script"
+        if ! docker_script_install; then
+          docker_apt_repair || true
+          err "Docker install failed on both routes"
+          return 1
+        fi
+      fi
+    fi
     start_docker_daemon \
       || warn "Docker is installed but the daemon did not come up; start it before scanning"
   fi

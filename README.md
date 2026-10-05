@@ -101,12 +101,19 @@ documents it. Docker **is** installed when missing, because two layers cannot ru
 without it; `--no-docker` (or `DOCKER_INSTALL_METHOD=none`) downgrades that to a
 report. Either way it is idempotent, and an existing Docker is never touched.
 
+Docker publishes packages for Debian, Ubuntu, Raspbian, Fedora, the RHEL family,
+SLES and openSUSE only. On a derivative (Kali, Parrot, Mint, Pop) the vendor script
+asks for a suite that does not exist, for example `debian kali-rolling`, so the
+installer uses the distro's own `docker.io` instead, which is what Kali documents.
+If such an attempt left an unusable `docker.list` behind, that entry is removed so
+`apt` keeps working; a Docker source you configured yourself is left alone.
+
 ### Install method
 
 | `TRIAD_INSTALL_METHOD` | Behaviour |
 |---|---|
-| `official` (default) | the vendor script from each project's README (above) |
-| `pkg` | `uv tool install strix-agent` / `hermes-agent`, else `pipx`, then fall back to the vendor script |
+| `official` (default) | the vendor script from each project's README (above); for Docker it is skipped on distros Docker does not publish for |
+| `pkg` | `uv tool install strix-agent` / `hermes-agent`, else `pipx`, then fall back to the vendor script; for Docker it is the distro's own packages (`docker.io`, `docker-ce`, `moby-engine`) |
 | `none` | detect only, never install |
 
 `STRIX_INSTALL_METHOD` / `HERMES_INSTALL_METHOD` override it per layer. `official`
