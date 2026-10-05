@@ -268,19 +268,54 @@ docker_script_install() {
   rm -f "$tmp"
 }
 
-start_docker_daemon() {
-  if have systemctl; then
-    as_root systemctl enable --now docker >/dev/null 2>&1 || return 1
-  elif have service; then
-    as_root service docker start >/dev/null 2>&1 || return 1
-  else
-    return 1
-  fi
+# `docker info` failing does not mean the daemon is down. Without group membership
+# it fails with "permission denied" on a perfectly healthy daemon, and trying to
+# start the daemon in that case produces a failure report that is simply wrong.
+docker_perm_denied() {
+  docker_present || return 1
+  local out
+  out="$("$DOCKER_BIN" info 2>&1 >/dev/null || true)"
+  case "$out" in
+    *[Pp]ermission\ denied*) return 0 ;;
+  esac
+  return 1
+}
+
+# Every start path has to wait for the socket, so keep that in one place.
+wait_for_docker_daemon() {
   local i
   for i in 1 2 3 4 5 6 7 8 9 10; do
     docker_daemon_up && return 0
     sleep 1
   done
+  return 1
+}
+
+# Start the daemon, and if it will not start, report what the init system said.
+# Discarding that output is why the only thing a user could tell us was "could not
+# start the docker daemon automatically", which names no cause and no next step.
+start_docker_daemon() {
+  local out rc
+  if have systemctl; then
+    rc=0
+    out="$(as_root systemctl enable --now docker 2>&1)" || rc=$?
+    if [ "$rc" = 0 ] && wait_for_docker_daemon; then return 0; fi
+    if [ -n "$out" ]; then echo "    systemctl enable --now docker: $(printf '%s' "$out" | tail -2)"; fi
+    rc=0
+    out="$(as_root systemctl start docker 2>&1)" || rc=$?
+    if [ "$rc" = 0 ] && wait_for_docker_daemon; then return 0; fi
+    if [ -n "$out" ]; then echo "    systemctl start docker: $(printf '%s' "$out" | tail -2)"; fi
+  fi
+  if have service; then
+    rc=0
+    out="$(as_root service docker start 2>&1)" || rc=$?
+    if [ "$rc" = 0 ] && wait_for_docker_daemon; then return 0; fi
+    if [ -n "$out" ]; then echo "    service docker start: $(printf '%s' "$out" | tail -2)"; fi
+  fi
+  if ! have systemctl && ! have service; then
+    warn "  neither systemctl nor service is present: this looks like a container or"
+    warn "  WSL, where the Docker daemon has to come from the host, not from inside"
+  fi
   return 1
 }
 
@@ -315,9 +350,17 @@ ensure_docker() {
   local method="${DOCKER_INSTALL_METHOD:-$INSTALL_METHOD}"
   if docker_daemon_up; then
     ok "docker is running ($("$DOCKER_BIN" --version 2>/dev/null | head -1))"
+  elif docker_perm_denied; then
+    # The daemon is up; this user just cannot use the socket yet. Trying to start
+    # the daemon here fails for an unrelated reason and misreports the cause.
+    warn "docker is running, but this user cannot use the socket yet"
   elif docker_present; then
-    warn "docker is installed but the daemon is not reachable; starting it"
-    start_docker_daemon || warn "could not start the docker daemon automatically"
+    warn "docker is installed but the daemon is not running; starting it"
+    if ! start_docker_daemon; then
+      warn "could not start the docker daemon automatically"
+      warn "  start it yourself, then re-check:  ./install.sh --check"
+      warn "    sudo systemctl enable --now docker     (or: sudo service docker start)"
+    fi
   else
     local use_official=0
     case "$method" in
@@ -366,17 +409,22 @@ ensure_docker() {
         fi
       fi
     fi
-    start_docker_daemon \
-      || warn "Docker is installed but the daemon did not come up; start it before scanning"
+    if ! start_docker_daemon; then
+      warn "Docker is installed but the daemon did not come up; start it before scanning"
+      warn "  sudo systemctl enable --now docker     (or: sudo service docker start)"
+    fi
   fi
 
-  # Talking to the socket needs group membership for anyone who is not root.
-  if [ "$(id -u)" != 0 ] && docker_present \
-     && ! "$DOCKER_BIN" info >/dev/null 2>&1 \
-     && ! id -nG 2>/dev/null | tr ' ' '\n' | grep -qx docker; then
-    if as_root usermod -aG docker "$(id -un)" 2>/dev/null; then
+  # Anyone who is not root needs group membership to talk to the socket. This is the
+  # usual reason that "docker is installed" and "docker info fails" are both true.
+  if [ "$(id -u)" != 0 ] && docker_present && ! docker_daemon_up; then
+    if id -nG 2>/dev/null | tr ' ' '\n' | grep -qx docker; then
+      warn "this user is already in the 'docker' group, so log out and back in"
+      warn "(or run 'newgrp docker') to pick the membership up in this session"
+    elif as_root usermod -aG docker "$(id -un)" 2>/dev/null; then
       ok "added $(id -un) to the docker group"
       warn "log out and back in (or run 'newgrp docker') before docker works without sudo"
+      warn "nothing that needs Docker will run until you do"
     fi
   fi
 
