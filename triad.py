@@ -475,9 +475,20 @@ BIND_CHOICES = [
 
 _BOLD, _GRN, _YEL, _RED, _RST = "\033[1m", "\033[32m", "\033[33m", "\033[31m", "\033[0m"
 
-# Returned by the prompts when the user bails out (Ctrl-C/EOF). Distinct from a
-# None option value, because "skip this" is a real choice in more than one menu.
-CANCELLED = object()
+class _Cancelled:
+    """Sentinel returned by the prompts when the user bails out (Ctrl-C or EOF).
+
+    A class rather than a bare object so the return type of a prompt can say what it
+    actually is, and a caller that checks for it gets a narrowed type from there on.
+    Distinct from a None option value, because "skip this" is a real choice in more
+    than one menu.
+    """
+
+    def __repr__(self):
+        return "CANCELLED"
+
+
+CANCELLED = _Cancelled()
 
 
 def _colour(text, code):
@@ -576,33 +587,152 @@ def _mask(value):
     return f"{value[:4]}...{value[-4:]}"
 
 
-def _ask(question, default=""):
+def _clean(value):
+    """Drop control characters and surrounding whitespace.
+
+    A terminal left in a non-canonical state delivers backspace and interrupt keys as
+    literal bytes. Those must never become part of a key value, where the failure they
+    cause is an authentication error that nothing in the output explains.
+    """
+    return "".join(ch for ch in (value or "") if ch.isprintable()).strip()
+
+
+def _tty_fd():
+    """(fd, owned) for a terminal to prompt on, or (None, False) when there is none.
+
+    stdin is used when it is a terminal. When stdin is a pipe but a terminal exists,
+    /dev/tty is opened instead, which is what getpass does and what keeps the wizard
+    usable when its own stdin has been redirected.
+    """
+    try:
+        if sys.stdin.isatty():
+            return sys.stdin.fileno(), False
+    except (ValueError, AttributeError, OSError):
+        pass
+    try:
+        return os.open("/dev/tty", os.O_RDWR), True
+    except OSError:
+        return None, False
+
+
+def _echo(text):
+    """Echo, but only onto a terminal: a redirected stdout should not get backspaces."""
+    if sys.stdout.isatty():
+        sys.stdout.write(text)
+        sys.stdout.flush()
+
+
+def _read_line(question, secret=False) -> "str | _Cancelled":
+    """Prompt for one line, with our own line editing.
+
+    Deliberately not `input` or `getpass`: both depend on the terminal's line
+    discipline, which a parent process can leave switched off. In that state backspace
+    is not an edit, it is a byte, so the value arrives holding control characters and
+    the display shows ^H, while Ctrl-C does not interrupt. Reading the bytes ourselves
+    means one backspace press deletes one character whatever the terminal is set to,
+    and no control byte can become part of a key.
+
+    Returns the line, or CANCELLED when the user interrupts or the input ends.
+    """
+    prompt = f"  {question}: "
+    fd, owned = _tty_fd()
+    if fd is None:
+        # No terminal at all (piped input, a CI runner, a hermetic test): there is
+        # nothing to edit, so a plain read is the honest behaviour.
+        try:
+            if secret:
+                import getpass
+                return _clean(getpass.getpass(prompt))
+            return _clean(input(prompt))
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return CANCELLED
+
+    try:
+        import termios
+    except ImportError:
+        return _clean(input(prompt))
+
+    try:
+        saved = termios.tcgetattr(fd)
+    except termios.error:
+        return _clean(input(prompt))
+
+    working = list(saved)
+    working[6] = list(saved[6])                      # a shallow copy shares the cc list
+    # ISIG is cleared as well: with it on, Ctrl-C is turned into a signal by the
+    # driver and never reaches us as a byte. Signals depend on this process being in
+    # the terminal's foreground group, which is not guaranteed (it fails outright in
+    # a pty whose foreground group is someone else, and Ctrl-C then does nothing at
+    # all). Reading the byte and cancelling ourselves works either way.
+    working[3] = saved[3] & ~(termios.ICANON | termios.ECHO | termios.ISIG)
+    working[6][termios.VMIN] = 1
+    working[6][termios.VTIME] = 0
+
+    sys.stdout.flush()          # keep the prompt after whatever was printed before it
+    sys.stdout.write(prompt)
+    sys.stdout.flush()
+    buf = bytearray()
+    try:
+        termios.tcsetattr(fd, termios.TCSADRAIN, working)
+        while True:
+            try:
+                chunk = os.read(fd, 1)
+            except OSError:
+                break
+            if not chunk:                            # input ended
+                print()
+                return CANCELLED
+            byte = chunk[0]
+            if byte in (0x0a, 0x0d):                 # Enter
+                break
+            if byte in (0x08, 0x7f):                 # Backspace and DEL both erase
+                if buf:
+                    buf.pop()
+                    _echo("\b \b")
+                continue
+            if byte == 0x15:                         # Ctrl-U: kill the line
+                while buf:
+                    buf.pop()
+                    _echo("\b \b")
+                continue
+            if byte == 0x03:                         # Ctrl-C cancels the prompt
+                raise KeyboardInterrupt
+            if byte == 0x04:                         # Ctrl-D: end input, or submit
+                if not buf:
+                    print()
+                    return CANCELLED
+                break
+            if byte < 0x20:                          # any other control byte: drop it
+                continue
+            buf.append(byte)
+            _echo("*" if secret else chunk.decode("utf-8", "replace"))
+    except KeyboardInterrupt:
+        return CANCELLED
+    finally:
+        try:
+            termios.tcsetattr(fd, termios.TCSADRAIN, saved)
+        except termios.error:
+            pass
+        if owned:
+            os.close(fd)
+        sys.stdout.write("\n")
+        sys.stdout.flush()
+    return _clean(bytes(buf).decode("utf-8", "replace"))
+
+
+def _ask(question, default="") -> "str | _Cancelled":
     """One prompt. Returns the default on empty input, CANCELLED if the user bails."""
     suffix = f" [{default}]" if default else ""
-    try:
-        answer = input(f"  {question}{suffix}: ").strip()
-    except (EOFError, KeyboardInterrupt):
-        print()
+    answer = _read_line(f"{question}{suffix}")
+    if isinstance(answer, _Cancelled):
         return CANCELLED
     return answer or default
 
 
-def _ask_secret(question):
-    """Prompt without echoing.
-
-    getpass needs a readable controlling terminal; under a pipe or some CI
-    wrappers it raises instead of blocking. Falling back to a visible prompt
-    keeps the wizard usable there, rather than aborting setup.
-    """
-    try:
-        import getpass
-        return getpass.getpass(f"  {question}: ").strip()
-    except KeyboardInterrupt:
-        print()
-        return CANCELLED
-    except Exception:
-        print("  (no hidden prompt available here; what you type will be visible)")
-        return _ask(question)
+def _ask_secret(question) -> "str | _Cancelled":
+    """Prompt for a secret, showing one asterisk per character typed."""
+    return _read_line(question, secret=True)
 
 
 def _choose(question, options, default=1):
@@ -613,7 +743,7 @@ def _choose(question, options, default=1):
         print(f"    {index}. {label}{mark}")
     while True:
         raw = _ask("Choose", str(default))
-        if raw is CANCELLED:
+        if isinstance(raw, _Cancelled):
             return CANCELLED
         try:
             picked = int(raw)
@@ -947,17 +1077,17 @@ def cmd_setup(args):
     updates = {}
     if interactive:
         model = _choose("Which model should Strix drive?", MODEL_CHOICES, default=1)
-        if model is CANCELLED:
+        if isinstance(model, _Cancelled):
             return _aborted()
         if model == "__other__":
             model = _ask("  Model id (LiteLLM form, e.g. openrouter/z-ai/glm-5.3)")
-            if model is CANCELLED:
+            if isinstance(model, _Cancelled):
                 return _aborted()
         if model:
             updates["STRIX_LLM"] = model
 
         key = _ask_secret("API key for that provider (LLM_API_KEY, hidden)")
-        if key is CANCELLED:
+        if isinstance(key, _Cancelled):
             return _aborted()
         if key:
             updates["LLM_API_KEY"] = key
@@ -967,17 +1097,17 @@ def cmd_setup(args):
         # Only the container dispatcher needs these: in local mode the workers
         # reuse whatever the host worker CLI is already logged into.
         worker_key = _choose("Worker LLM key for the Cairn dispatcher?", WORKER_KEY_CHOICES, default=1)
-        if worker_key is CANCELLED:
+        if isinstance(worker_key, _Cancelled):
             return _aborted()
         if worker_key:
             value = _ask_secret(f"{worker_key} (hidden)")
-            if value is CANCELLED:
+            if isinstance(value, _Cancelled):
                 return _aborted()
             if value:
                 updates[worker_key] = value
 
         bind = _choose("Where should the Cairn API and console bind?", BIND_CHOICES, default=1)
-        if bind is CANCELLED:
+        if isinstance(bind, _Cancelled):
             return _aborted()
         if bind:
             updates["CAIRN_BIND"] = bind
@@ -1011,7 +1141,7 @@ def cmd_setup(args):
 
     if interactive:
         answer = _ask("Start Cairn and the dispatcher now? (Y/n)", "y")
-        if answer is CANCELLED:
+        if isinstance(answer, _Cancelled):
             return _aborted()
         if answer.lower() not in ("n", "no"):
             return cmd_up(args)
@@ -1227,7 +1357,9 @@ def cmd_auth(args):
 
     key = getattr(args, "key", None)
     if key:
-        entries = {getattr(args, "provider", None) or "opencode-go": key}
+        # Same cleaning as the wizard: a key pasted from a terminal that mangles
+        # control keys must not carry those bytes into opencode's credentials.
+        entries = {getattr(args, "provider", None) or "opencode-go": _clean(key)}
     else:
         entries = {provider: env[var]
                    for var, provider in OPENCODE_AUTH_KEYS.items() if env.get(var)}
