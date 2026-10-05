@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 #
-# Triad installer: Docker + Strix (discovery) + Cairn (exploitation).
+# Triad installer: the prerequisites (uv, Docker, a worker CLI) plus Strix and
+# Cairn. The normal flow is Strix -> Cairn and needs no agent framework; Hermes is
+# an optional extra layer and is never installed unless you ask for it.
 #
-# The normal flow is Strix -> Cairn and needs no agent framework. Hermes is an
-# optional extra layer and is never installed unless you ask for it.
-#
-#   ./install.sh                 install uv, Docker, Strix and Cairn (Hermes only if present)
+#   ./install.sh                 install everything the flow needs
 #   ./install.sh --with-hermes   also install Hermes if it is missing
 #   ./install.sh --no-docker     never install Docker, only report it
 #   ./install.sh --no-uv         never install uv, only report it
+#   ./install.sh --no-worker     never install a worker CLI, only report it
 #   ./install.sh --detect-only   report what is present, install nothing
 #   ./install.sh --check         verify an existing install, change nothing
 #   ./install.sh --uninstall     remove the symlinks this script created
@@ -38,6 +38,10 @@ DOCKER_INSTALL_URL="${DOCKER_INSTALL_URL:-https://get.docker.com}"
 DOCKER_BIN="${DOCKER_BIN:-docker}"
 # Astral's own installer. Needs no root, lands in ~/.local/bin.
 UV_INSTALL_URL="${UV_INSTALL_URL:-https://astral.sh/uv/install.sh}"
+# The worker CLI the dispatcher drives in local mode. opencode is the backend this
+# repo adds to Cairn, and the one that works on arm64 and a free tier.
+WORKER_INSTALL_URL="${WORKER_INSTALL_URL:-https://opencode.ai/install}"
+WORKER_NAMES="opencode claude codex pi"
 
 MODE="install"
 # Installing the missing layers is the default; --detect-only turns it off.
@@ -57,6 +61,8 @@ for arg in "$@"; do
                     DOCKER_INSTALL_METHOD="none" ;;
     --no-uv)
                     UV_INSTALL_METHOD="none" ;;
+    --no-worker)
+                    WORKER_INSTALL_METHOD="none" ;;
     --with-hermes|--all)
                     WITH_HERMES=1 ;;
     --with-strix)
@@ -90,7 +96,7 @@ uv_bin_path() {
 # yet (they tell you to `source ~/.bashrc`). Pick them up immediately.
 refresh_path() {
   local d
-  for d in "$HOME/.local/bin" "$HOME/.hermes/bin" "$HOME/.strix/bin"; do
+  for d in "$HOME/.local/bin" "$HOME/.hermes/bin" "$HOME/.strix/bin" "$HOME/.opencode/bin"; do
     [ -d "$d" ] || continue
     case ":$PATH:" in
       *":$d:"*) ;;
@@ -389,6 +395,83 @@ ensure_uv() {
   return "$rc"   # must not be clobbered by the calls above
 }
 
+worker_present() {
+  local n
+  for n in $WORKER_NAMES; do have "$n" && return 0; done
+  [ -x "$HOME/.opencode/bin/opencode" ]
+}
+
+worker_bin_path() {
+  local n c
+  for n in $WORKER_NAMES; do
+    c="$(command -v "$n" 2>/dev/null)"
+    if [ -n "$c" ]; then printf '%s\n' "$c"; return 0; fi
+  done
+  for c in "$HOME/.opencode/bin/opencode" "$HOME/.local/bin/opencode"; do
+    if [ -x "$c" ]; then printf '%s\n' "$c"; return 0; fi
+  done
+  return 1
+}
+
+# The dispatcher drives a worker CLI to claim intents. Local mode uses one on the
+# host, so with none installed Cairn sits idle and a run just looks hung.
+pkg_worker() {
+  if have npm; then
+    echo "    npm install -g opencode-ai"
+    npm install -g opencode-ai || return 1
+    return 0
+  fi
+  if have bun; then
+    echo "    bun install -g opencode-ai"
+    bun install -g opencode-ai || return 1
+    return 0
+  fi
+  if have brew; then
+    echo "    brew install anomalyco/tap/opencode"
+    brew install anomalyco/tap/opencode || return 1
+    return 0
+  fi
+  return 127
+}
+
+ensure_worker_cli() {
+  if worker_present; then
+    ok "worker CLI present ($("$(worker_bin_path)" --version 2>/dev/null | head -1))"
+    return 0
+  fi
+  local method="${WORKER_INSTALL_METHOD:-$INSTALL_METHOD}"
+  case "$method" in
+    official)
+      echo "  installing opencode using the command its docs publish"
+      script_install "$WORKER_INSTALL_URL" \
+        || { err "the worker CLI install failed"; return 1; }
+      ;;
+    pkg)
+      echo "  installing opencode from a package manager"
+      if ! pkg_worker; then
+        warn "no npm, bun or brew; falling back to the vendor script"
+        script_install "$WORKER_INSTALL_URL" \
+          || { err "the worker CLI install failed"; return 1; }
+      fi
+      ;;
+    none)
+      warn "no worker CLI and installation is disabled ($method)"
+      warn "  install one yourself: https://opencode.ai/docs/  (or: npm i -g opencode-ai)"
+      return 1
+      ;;
+    *) err "unknown install method '$method' (use official, pkg or none)"; return 2 ;;
+  esac
+  refresh_path
+  if worker_present; then
+    ok "opencode installed ($("$(worker_bin_path)" --version 2>/dev/null | head -1))"
+    warn "it still needs an LLM login before the dispatcher can use it:"
+    warn "  opencode auth login       (or put OPENCODE_GO_API_KEY in .env)"
+  else
+    warn "opencode installed, but not on PATH in this shell yet; open a new shell"
+  fi
+  return 0
+}
+
 ensure_strix() {
   if strix_present; then ok "strix already installed"; return 0; fi
   local rc=0
@@ -456,6 +539,13 @@ else
   warn "uv not found; will install it (${UV_INSTALL_METHOD:-$INSTALL_METHOD})"
 fi
 
+if worker_present; then ok "worker CLI present: $(basename "$(worker_bin_path)")"
+elif [ "$MODE" = "check" ] || [ "${WORKER_INSTALL_METHOD:-$INSTALL_METHOD}" = "none" ]; then
+  warn "no worker CLI (opencode/claude/codex/pi); the dispatcher will have nothing to run"
+else
+  warn "no worker CLI; will install opencode (${WORKER_INSTALL_METHOD:-$INSTALL_METHOD})"
+fi
+
 if [ "$MODE" = "check" ]; then
   refresh_path
   if strix_present; then ok "strix present"; else warn "strix not found"; fi
@@ -498,6 +588,8 @@ if [ "$MODE" = "check" ]; then
   else warn "docker compose v2 missing (cairn-server needs it)"; fi
   if uv_present; then ok "uv $(uv --version 2>/dev/null | awk '{print $2}')"
   else err "uv missing (Cairn and 'triad up' need it); run ./install.sh"; FAIL=1; fi
+  if worker_present; then ok "worker CLI present"
+  else warn "no worker CLI (opencode/claude/codex/pi); the dispatcher will idle"; fi
   if [ -f "$TRIAD_HOME/.env" ]; then ok ".env present"; else warn ".env missing (copy .env.example and fill it in)"; fi
   if command -v python3 >/dev/null 2>&1 && "$BIN_DIR/triad" --help >/dev/null 2>&1; then
     ok "triad CLI runs"
@@ -514,6 +606,11 @@ fi
 # It is small and needs no root, so there is no reason to leave it missing.
 hdr "uv"
 ensure_uv || warn "uv is not available; Cairn and 'triad up' need it"
+#
+# The dispatcher drives a worker CLI on the host in local mode. With none
+# installed, Cairn sits idle and the run looks hung rather than failing.
+hdr "Worker CLI (opencode)"
+ensure_worker_cli || warn "no worker CLI; the dispatcher will have nothing to claim intents"
 #
 # Docker next: Strix's sandbox and the Cairn server both need it, so leaving it
 # until last would install layers that cannot run.

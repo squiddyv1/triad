@@ -521,14 +521,70 @@ def _worker_cli():
     return None, None
 
 
-def _docker_ok():
+# Why Docker is unusable, so `triad up` can name the actual problem instead of
+# saying "Docker is not usable" and leaving the user to guess. Installed-but-broken
+# is the common case: the daemon is down, or the user is not in the docker group yet.
+DOCKER_STATES = {
+    "absent": ("Docker is not installed",
+               "./install.sh installs it"),
+    "no-daemon": ("the Docker daemon is not reachable",
+                  "start it:  sudo systemctl enable --now docker"),
+    "no-permission": ("this user cannot use the Docker socket (not in the 'docker' group)",
+                      'sudo usermod -aG docker "$USER", then log out and back in '
+                      "(or run: newgrp docker)"),
+    "no-compose": ("the 'docker compose' v2 plugin is missing",
+                   "./install.sh ensures it (package: docker-compose-v2 or docker-compose-plugin)"),
+}
+
+
+def _docker_state():
+    """Classify Docker: ok, absent, no-daemon, no-permission or no-compose."""
     if not shutil.which("docker"):
-        return False
+        return "absent"
     try:
-        return subprocess.run(["docker", "info"], stdout=subprocess.DEVNULL,
-                              stderr=subprocess.DEVNULL, timeout=20).returncode == 0
+        probe = subprocess.run(["docker", "info"], capture_output=True, text=True, timeout=25)
     except (OSError, subprocess.SubprocessError):
-        return False
+        return "no-daemon"
+    if probe.returncode != 0:
+        blob = f"{probe.stderr or ''}{probe.stdout or ''}".lower()
+        if "permission denied" in blob:
+            return "no-permission"
+        return "no-daemon"
+    if _compose_cmd() is None:
+        return "no-compose"
+    return "ok"
+
+
+def _docker_ok():
+    return _docker_state() == "ok"
+
+
+def _log_tail(path, lines=12):
+    """Last non-empty lines of a background process log."""
+    try:
+        text = Path(path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    return [line for line in text.splitlines() if line.strip()][-lines:]
+
+
+def _print_tail(path, lines=12):
+    """Show why a detached process died, and name the likely cause.
+
+    Without this the caller only learns that something exited, which is the least
+    useful half of the information already sitting in the log.
+    """
+    tail = _log_tail(path, lines)
+    if not tail:
+        print(f"     (no output in {path})")
+        return
+    for line in tail:
+        print(f"     | {line}")
+    blob = " ".join(tail).lower()
+    if any(k in blob for k in ("mirrors.aliyun", "pypi.tuna", "failed to download",
+                               "failed to fetch", "network is unreachable")):
+        print("     | looks like a package-download failure. Cairn pins the Aliyun PyPI")
+        print("     | mirror; retry with:  UV_DEFAULT_INDEX=https://pypi.org/simple triad up")
 
 
 def _compose_cmd():
@@ -750,8 +806,8 @@ def cmd_up(args):
 
     # Both routes need something: Docker for the server, uv for the host server
     # and for the dispatcher either way. Say which is missing before trying.
-    docker_usable = _docker_ok() and _compose_cmd() is not None
-    if not _cairn_up() and not docker_usable and _uv_bin() is None:
+    state = _docker_state()
+    if not _cairn_up() and state != "ok" and _uv_bin() is None:
         _err("cannot start the stack: no usable Docker and no uv")
         print("     ./install.sh installs both, then re-run: triad up")
         print("     uv alone is enough (it runs Cairn as a host process):")
@@ -761,9 +817,14 @@ def cmd_up(args):
     if _cairn_up():
         _ok(f"Cairn already answering at {_base_url()}")
     elif getattr(args, "container", False):
+        if state != "ok":
+            reason, fix = DOCKER_STATES[state]
+            _err(f"--container needs a usable Docker: {reason}")
+            print(f"     fix: {fix}")
+            return 2
         compose = _compose_cmd()
-        if compose is None or not _docker_ok():
-            _err("--container needs a running Docker with the compose plugin")
+        if compose is None:                      # unreachable when state is ok
+            _err("docker compose is not available")
             return 2
         if platform.machine().lower() not in ("x86_64", "amd64"):
             _warn(f"the worker image is amd64-only and this host is {platform.machine()}")
@@ -776,9 +837,13 @@ def cmd_up(args):
         if not _wait_for_cairn():
             _err(f"Cairn did not come up; try: {SERVER_LOG} or docker compose logs cairn-server")
             return 2
-    elif _docker_ok() and _compose_cmd():
+    elif state == "ok":
+        compose = _compose_cmd()
+        if compose is None:
+            _err("docker compose is not available")
+            return 2
         _ok("starting cairn-server with docker compose (first run builds the image)")
-        if subprocess.run(_compose_cmd() + ["up", "-d", "--build", "cairn-server"],
+        if subprocess.run(compose + ["up", "-d", "--build", "cairn-server"],
                           cwd=str(REPO)).returncode != 0:
             _err("docker compose failed; see the output above")
             return 2
@@ -786,15 +851,21 @@ def cmd_up(args):
             _err("Cairn did not come up; check: docker compose logs cairn-server")
             return 2
     else:
-        _warn("Docker is not usable here, so the Cairn server runs as a host process")
-        _warn("that is the no-sandbox path: workers inherit your user's permissions")
+        # Name the actual Docker problem and how to clear it. "Docker is not usable"
+        # on its own is what sent someone to reinstalling an already-working Docker.
+        reason, fix = DOCKER_STATES[state]
+        _warn(f"Docker is not usable here: {reason}")
+        print(f"     fix: {fix}")
+        _warn("falling back to a host Cairn server (no-sandbox mode)")
         pid, problem = _server_local_start()
         if problem:
             _err(problem)
+            _print_tail(SERVER_LOG)
             return 2
         _ok(f"cairn serve started (pid {pid}, log {SERVER_LOG})")
         if not _wait_for_cairn(timeout=90):
-            _err(f"Cairn did not answer; see {SERVER_LOG}")
+            _err("Cairn did not answer; last lines of its log:")
+            _print_tail(SERVER_LOG)
             return 2
 
     pid = _pid_alive(DISPATCH_PID)
@@ -806,15 +877,17 @@ def cmd_up(args):
     else:
         worker, where = _worker_cli()
         if worker is None:
-            _warn("no worker CLI found (opencode, claude, codex, pi)")
-            _warn("the dispatcher needs one to claim intents; install one, or use the")
-            _warn("containerised dispatcher with dispatch.yaml on an amd64 host")
+            _warn("no worker CLI found (opencode, claude, codex or pi)")
+            print("     the dispatcher needs one to claim intents, so nothing will move")
+            print("     install one:   ./install.sh          (installs opencode)")
+            print("     then sign in:  opencode auth login")
         else:
             _ok(f"worker CLI: {worker} ({where})")
         config = getattr(args, "config", None) or "dispatch.local.yaml"
         pid, problem = _dispatcher_start(config)
         if problem:
             _err(f"the dispatcher did not start: {problem}")
+            _print_tail(DISPATCH_LOG)
             return 2
         _ok(f"dispatcher started (pid {pid}, config {config}, log {DISPATCH_LOG})")
 
@@ -871,6 +944,10 @@ def cmd_home(args):
         _ok(f"Cairn answering at {base}")
     else:
         _warn(f"Cairn is not answering at {base}")
+        state = _docker_state()
+        if state != "ok":
+            reason, _fix = DOCKER_STATES[state]
+            _warn(f"docker: {reason}")
     pid = _pid_alive(DISPATCH_PID)
     if pid:
         _ok(f"dispatcher running (pid {pid}, log {DISPATCH_LOG})")
