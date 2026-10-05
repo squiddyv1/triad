@@ -35,7 +35,7 @@ Reasoning, verified API notes, failure modes and the build plan:
 ## Install
 
 ```bash
-git clone https://github.com/<you>/triad.git
+git clone https://github.com/squiddyv1/triad.git
 cd triad
 ./install.sh
 ```
