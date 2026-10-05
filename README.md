@@ -46,52 +46,60 @@ cd triad
 ./install.sh
 ```
 
-`install.sh` is idempotent: it installs the two layers the normal flow needs, and
-wires the third only if you ask.
+`install.sh` is idempotent: it installs every layer the flow needs and wires the
+optional one only if you ask.
 
 | Layer | Default behaviour |
 |---|---|
+| **Docker** (daemon + compose v2) | install if missing; `--no-docker` to only report |
 | **Triad harness** (tool package, CLI, contracts) | install |
 | **Cairn** (`oritera/Cairn`, cloned + patched) | install |
 | **Strix** | install if missing (the flow needs it) |
 | **Hermes** (optional) | install only with `--with-hermes`; if already present, the plugin is linked |
 
-Strix is installed with **the exact command its repository documents**, so this
-follows the official route rather than inventing one. Hermes, when you ask for it,
-goes through its own installer the same way:
+Docker and Strix are installed with **the exact commands their own docs publish**,
+so this follows the official route rather than inventing one. Hermes, when you ask
+for it, goes through its own installer the same way:
 
 ```
+Docker  curl -fsSL https://get.docker.com | sh                             -> dockerd + compose v2
 Strix   curl -sSL https://strix.ai/install | bash                          -> ~/.strix/bin/strix
 Hermes  curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash -> ~/.hermes
 ```
 
 The only deviation is that the script is fetched to a temp file and its size and
 sha256 are printed before it runs, a reported one-liner instead of a blind pipe.
-Same bytes, same installer.
+Same bytes, same installer. Docker's needs root, so it runs under `sudo` (or
+directly when the installer is already root).
 
 What it does, in order:
 
 1. checks prerequisites and reports exactly what is missing;
-2. installs Strix if it is absent (see the method knobs below);
-3. clones Cairn and applies `patches/0001-opencode-worker-backend.patch`
+2. installs Docker if it is absent, starts the daemon, adds you to the `docker`
+   group and ensures the compose v2 plugin;
+3. installs Strix if it is absent (see the method knobs below);
+4. clones Cairn and applies `patches/0001-opencode-worker-backend.patch`
    (upstream Cairn is never vendored into this repo);
-4. creates `.env` from `.env.example` and the engagement directory;
-5. installs a `triad` wrapper into `~/.local/bin` so the CLI works from anywhere;
-6. only if Hermes is present, or `--with-hermes` was passed: symlinks `plugin/`
+5. creates `.env` from `.env.example` and the engagement directory;
+6. installs a `triad` wrapper into `~/.local/bin` so the CLI works from anywhere;
+7. only if Hermes is present, or `--with-hermes` was passed: symlinks `plugin/`
    into `$HERMES_HOME/plugins/triad` and validates it with `hermes plugins doctor`.
    Otherwise it reports that Hermes is absent and moves on, because the CLI drives
    the same package directly.
 
 ```bash
-./install.sh                 # install / repair Strix + Cairn; leave Hermes alone
+./install.sh                 # install / repair Docker + Strix + Cairn; leave Hermes alone
 ./install.sh --with-hermes   # also install Hermes and wire the plugin
+./install.sh --no-docker     # do not install Docker, only report whether it is there
 ./install.sh --detect-only   # report what is present, install nothing
 ./install.sh --check         # verify install health, change nothing
 ./install.sh --uninstall     # remove the symlinks it created (leaves Strix/Hermes alone)
 ```
 
-Docker and `uv` are checked but never installed; both have their own installers
-and installing them silently is not this script's call.
+`uv` is checked but never installed, since it has its own installer and Cairn
+documents it. Docker **is** installed when missing, because two layers cannot run
+without it; `--no-docker` (or `DOCKER_INSTALL_METHOD=none`) downgrades that to a
+report. Either way it is idempotent, and an existing Docker is never touched.
 
 ### Install method
 
@@ -122,6 +130,7 @@ Every path is overridable, so nothing is machine-specific:
 | Component | Needs |
 |---|---|
 | Python | ≥ 3.9 for the CLI (the installer checks) |
+| Docker | installed if missing by default: the daemon is started and the invoking user is added to the `docker` group; `--no-docker` to only report it |
 | Strix | Docker running; `pipx install strix-agent` or `curl -sSL https://strix.ai/install \| bash`; an LLM key |
 | Cairn | `uv` (the installer checks) + Docker **and the `docker compose` v2 plugin** for container mode, **or** local mode reusing a host worker CLI |
 | Hermes (optional) | a Hermes install, only for the control plane; `mcp<2` for the MCP bridge (`uv run --with 'mcp<2'`) |

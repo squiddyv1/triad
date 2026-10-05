@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 #
-# Triad installer: Strix (discovery) + Cairn (exploitation).
+# Triad installer: Docker + Strix (discovery) + Cairn (exploitation).
 #
-# The normal flow is Strix -> Cairn and needs neither Hermes nor Docker images
-# beyond Strix's sandbox. Hermes is an optional extra layer (orchestration,
-# skills, gateway approvals) and is never installed unless you ask for it.
+# The normal flow is Strix -> Cairn and needs no agent framework. Hermes is an
+# optional extra layer and is never installed unless you ask for it.
 #
-#   ./install.sh                 install Strix + Cairn, wire Hermes only if present
+#   ./install.sh                 install Docker, Strix and Cairn (Hermes only if present)
 #   ./install.sh --with-hermes   also install Hermes if it is missing
+#   ./install.sh --no-docker     never install Docker, only report it
 #   ./install.sh --detect-only   report what is present, install nothing
 #   ./install.sh --check         verify an existing install, change nothing
 #   ./install.sh --uninstall     remove the symlinks this script created
@@ -31,23 +31,32 @@ PLUGIN_DST="$HERMES_HOME/plugins/triad"
 # Official installers, used only as a fallback when no package manager is present.
 STRIX_INSTALL_URL="https://strix.ai/install"
 HERMES_INSTALL_URL="https://hermes-agent.nousresearch.com/install.sh"
+# Docker publishes this convenience script for the same purpose. Any override
+# here is env-only, so a corporate mirror can be dropped in.
+DOCKER_INSTALL_URL="${DOCKER_INSTALL_URL:-https://get.docker.com}"
+DOCKER_BIN="${DOCKER_BIN:-docker}"
 
 MODE="install"
 # Installing the missing layers is the default; --detect-only turns it off.
 INSTALL_METHOD="${TRIAD_INSTALL_METHOD:-official}"
 # Hermes is optional: only installed when explicitly requested.
 WITH_HERMES=0
+# Docker is installed by default, because Strix's sandbox and Cairn's container
+# mode both need it; --no-docker (or DOCKER_INSTALL_METHOD=none) opts out.
+DOCKER_INSTALL_METHOD="${DOCKER_INSTALL_METHOD:-}"
 for arg in "$@"; do
   case "$arg" in
     --check)        MODE="check" ;;
     --uninstall)    MODE="uninstall" ;;
     --detect-only|--no-deps)
                     INSTALL_METHOD="none" ;;
+    --no-docker)
+                    DOCKER_INSTALL_METHOD="none" ;;
     --with-hermes|--all)
                     WITH_HERMES=1 ;;
     --with-strix)
                     : ;;   # Strix is part of the normal flow and installs anyway
-    -h|--help)      sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help)      sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *)              echo "unknown option: $arg (try --help)" >&2; exit 2 ;;
   esac
 done
@@ -132,6 +141,140 @@ install_layer() {
   fi
 }
 
+# Docker. The one prerequisite the harness cannot work around: Strix runs its
+# agent in a sandbox container, and Cairn's default mode is compose. Installed by
+# default; --no-docker or DOCKER_INSTALL_METHOD=none only reports it.
+docker_present()   { have "$DOCKER_BIN"; }
+docker_daemon_up() { docker_present && "$DOCKER_BIN" info >/dev/null 2>&1; }
+
+# Root directly, else sudo. Non-interactive runs fail fast rather than hanging.
+as_root() {
+  if [ "$(id -u)" = 0 ]; then "$@"
+  elif have sudo; then sudo "$@"
+  else err "need root for '$1', and sudo is not available"; return 127
+  fi
+}
+
+# Distro route. Package names differ per family, so the list is explicit.
+pkg_docker() {
+  local pm pkgs
+  if   have apt-get; then pm="apt-get"; pkgs="docker.io docker-compose-v2"
+  elif have dnf;     then pm="dnf";     pkgs="docker docker-compose-plugin"
+  elif have yum;     then pm="yum";     pkgs="docker docker-compose-plugin"
+  elif have zypper;  then pm="zypper";  pkgs="docker docker-compose"
+  elif have pacman;  then pm="pacman";  pkgs="docker docker-compose"
+  else return 127
+  fi
+  echo "    $pm install $pkgs"
+  case "$pm" in
+    apt-get) as_root apt-get update -qq && as_root apt-get install -y $pkgs ;;
+    zypper)  as_root zypper --non-interactive install $pkgs ;;
+    pacman)  as_root pacman -S --noconfirm $pkgs ;;
+    *)       as_root "$pm" install -y $pkgs ;;
+  esac
+}
+
+# The vendor script runs as root. Fetched to a temp file and hashed first, same
+# as every other layer, so nothing is piped blindly into a shell.
+docker_script_install() {
+  local tmp
+  tmp="$(mktemp -t triad-docker.XXXXXX.sh)"
+  curl -fsSL "$DOCKER_INSTALL_URL" -o "$tmp" \
+    || { err "could not fetch $DOCKER_INSTALL_URL"; return 1; }
+  echo "    fetched $DOCKER_INSTALL_URL"
+  echo "    -> $tmp  ($(wc -c <"$tmp") bytes, sha256 $(sha256sum "$tmp" | cut -c1-32)…)"
+  as_root bash "$tmp" || { err "the Docker installer exited non-zero (script kept at $tmp)"; return 1; }
+  rm -f "$tmp"
+}
+
+start_docker_daemon() {
+  if have systemctl; then
+    as_root systemctl enable --now docker >/dev/null 2>&1 || return 1
+  elif have service; then
+    as_root service docker start >/dev/null 2>&1 || return 1
+  else
+    return 1
+  fi
+  local i
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    docker_daemon_up && return 0
+    sleep 1
+  done
+  return 1
+}
+
+# cairn-server is a compose service, so the v2 plugin is part of a working install.
+ensure_compose() {
+  if "$DOCKER_BIN" compose version >/dev/null 2>&1; then
+    ok "docker compose v2 present"
+    return 0
+  fi
+  warn "the docker compose v2 plugin is missing; cairn-server needs it"
+  if have apt-get; then
+    as_root apt-get install -y docker-compose-v2 >/dev/null 2>&1 \
+      || as_root apt-get install -y docker-compose-plugin >/dev/null 2>&1 || true
+  elif have dnf; then
+    as_root dnf install -y docker-compose-plugin >/dev/null 2>&1 || true
+  elif have yum; then
+    as_root yum install -y docker-compose-plugin >/dev/null 2>&1 || true
+  elif have zypper; then
+    as_root zypper --non-interactive install docker-compose >/dev/null 2>&1 || true
+  elif have pacman; then
+    as_root pacman -S --noconfirm docker-compose >/dev/null 2>&1 || true
+  fi
+  if "$DOCKER_BIN" compose version >/dev/null 2>&1; then
+    ok "docker compose v2 installed"
+  else
+    warn "install the compose plugin yourself: https://docs.docker.com/compose/install/"
+    return 1
+  fi
+}
+
+ensure_docker() {
+  local method="${DOCKER_INSTALL_METHOD:-$INSTALL_METHOD}"
+  if docker_daemon_up; then
+    ok "docker is running ($("$DOCKER_BIN" --version 2>/dev/null | head -1))"
+  elif docker_present; then
+    warn "docker is installed but the daemon is not reachable; starting it"
+    start_docker_daemon || warn "could not start the docker daemon automatically"
+  else
+    case "$method" in
+      official)
+        echo "  installing Docker using the command its docs publish"
+        docker_script_install || { err "Docker install failed"; return 1; }
+        ;;
+      pkg)
+        echo "  installing Docker from the distro package manager"
+        if ! pkg_docker; then
+          warn "the package manager route failed; falling back to the vendor script"
+          docker_script_install || { err "Docker install failed"; return 1; }
+        fi
+        ;;
+      none)
+        warn "docker is missing and installation is disabled ($method)"
+        warn "  install it yourself: https://docs.docker.com/engine/install/"
+        return 1
+        ;;
+      *) err "unknown install method '$method' (use official, pkg or none)"; return 2 ;;
+    esac
+    start_docker_daemon \
+      || warn "Docker is installed but the daemon did not come up; start it before scanning"
+  fi
+
+  # Talking to the socket needs group membership for anyone who is not root.
+  if [ "$(id -u)" != 0 ] && docker_present \
+     && ! "$DOCKER_BIN" info >/dev/null 2>&1 \
+     && ! id -nG 2>/dev/null | tr ' ' '\n' | grep -qx docker; then
+    if as_root usermod -aG docker "$(id -un)" 2>/dev/null; then
+      ok "added $(id -un) to the docker group"
+      warn "log out and back in (or run 'newgrp docker') before docker works without sudo"
+    fi
+  fi
+
+  ensure_compose || true   # optional: local mode works without it
+  return 0
+}
+
 ensure_strix() {
   if strix_present; then ok "strix already installed"; return 0; fi
   local rc=0
@@ -184,11 +327,12 @@ else
   err "python3 not found"; FAIL=1
 fi
 
-if have docker; then
-  if docker info >/dev/null 2>&1; then ok "docker (daemon reachable)"
-  else warn "docker installed but the daemon is not reachable; needed by Strix and by Cairn container mode"; fi
+if docker_daemon_up; then ok "docker (daemon reachable)"
+elif docker_present; then warn "docker installed but the daemon is not reachable; will try to start it"
+elif [ "$MODE" = "check" ] || [ "${DOCKER_INSTALL_METHOD:-$INSTALL_METHOD}" = "none" ]; then
+  warn "docker not found; Strix needs it, Cairn local mode does not"
 else
-  warn "docker not found; Strix requires it, Cairn local mode does not"
+  warn "docker not found; will install it (${DOCKER_INSTALL_METHOD:-$INSTALL_METHOD})"
 fi
 
 if have uv; then ok "uv $(uv --version 2>/dev/null | awk '{print $2}')"
@@ -231,6 +375,10 @@ if [ "$MODE" = "check" ]; then
     ok "Hermes absent; plugin link not required"
   fi
   if [ -x "$BIN_DIR/triad" ]; then ok "triad CLI at $BIN_DIR/triad"; else err "triad CLI missing at $BIN_DIR/triad"; FAIL=1; fi
+  if docker_daemon_up; then ok "docker daemon reachable"
+  else warn "docker daemon not reachable (Strix needs it; Cairn local mode does not)"; fi
+  if "$DOCKER_BIN" compose version >/dev/null 2>&1; then ok "docker compose v2 available"
+  else warn "docker compose v2 missing (cairn-server needs it)"; fi
   if [ -f "$TRIAD_HOME/.env" ]; then ok ".env present"; else warn ".env missing (copy .env.example and fill it in)"; fi
   if command -v python3 >/dev/null 2>&1 && "$BIN_DIR/triad" --help >/dev/null 2>&1; then
     ok "triad CLI runs"
@@ -242,6 +390,11 @@ if [ "$MODE" = "check" ]; then
 fi
 
 [ "$FAIL" = 0 ] || { echo; err "fix the errors above, then re-run."; exit 1; }
+#
+# Docker first: Strix's sandbox and the Cairn server both need it, so leaving it
+# until last would install layers that cannot run.
+hdr "Docker"
+ensure_docker || warn "docker is not usable; Strix will not run until it is"
 #
 # Strix: install it if missing. It is the discovery layer, so the normal
 # Strix -> Cairn flow depends on it.
