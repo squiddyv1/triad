@@ -561,6 +561,46 @@ def _docker_state():
     return "ok"
 
 
+def _docker_perm_fix():
+    """Right advice for a socket permission error, which depends on the group state.
+
+    Three cases look identical from `docker info` but need different actions: the
+    group was just added (re-login), the session already has it (something else
+    restricts the socket), or the user was never added at all.
+    """
+    try:
+        import grp
+        entry = grp.getgrnam("docker")
+    except (ImportError, KeyError, OSError):
+        return ('no "docker" group exists on this host; reinstall Docker with '
+                "./install.sh, or use local mode (triad up without Docker)")
+    if entry.gr_gid in os.getgroups():
+        return ("your session already has the docker group, so the socket itself is "
+                "restricted; check:  ls -l /var/run/docker.sock")
+    try:
+        import getpass
+        name = getpass.getuser()
+    except Exception:
+        name = os.environ.get("USER", "")
+    if name and name in entry.gr_mem:
+        return ("you are already in the 'docker' group, so membership has not reached "
+                "this session yet: log out and back in (or run: newgrp docker)")
+    return ('sudo usermod -aG docker "$USER", then log out and back in '
+            "(or run: newgrp docker)")
+
+
+def _docker_remedy(state):
+    """(reason, fix) for a docker state, with the permission advice computed.
+
+    Falls back rather than raising: this only ever runs on a diagnostic path, and a
+    KeyError there would replace a fixable message with a traceback.
+    """
+    reason, fix = DOCKER_STATES.get(state, ("Docker is not usable", "./install.sh diagnoses it"))
+    if state == "no-permission":
+        fix = _docker_perm_fix()
+    return reason, fix
+
+
 def _docker_ok():
     return _docker_state() == "ok"
 
@@ -833,7 +873,7 @@ def cmd_up(args):
         _ok(f"Cairn already answering at {_base_url()}")
     elif getattr(args, "container", False):
         if state != "ok":
-            reason, fix = DOCKER_STATES[state]
+            reason, fix = _docker_remedy(state)
             _err(f"--container needs a usable Docker: {reason}")
             print(f"     fix: {fix}")
             return 2
@@ -868,7 +908,7 @@ def cmd_up(args):
     else:
         # Name the actual Docker problem and how to clear it. "Docker is not usable"
         # on its own is what sent someone to reinstalling an already-working Docker.
-        reason, fix = DOCKER_STATES[state]
+        reason, fix = _docker_remedy(state)
         _warn(f"Docker is not usable here: {reason}")
         print(f"     fix: {fix}")
         _warn("falling back to a host Cairn server (no-sandbox mode)")
@@ -1058,7 +1098,7 @@ def cmd_home(args):
         _warn(f"Cairn is not answering at {base}")
         state = _docker_state()
         if state != "ok":
-            reason, _fix = DOCKER_STATES[state]
+            reason, _fix = _docker_remedy(state)
             _warn(f"docker: {reason}")
     pid = _pid_alive(DISPATCH_PID)
     if pid:
