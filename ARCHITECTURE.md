@@ -1,8 +1,14 @@
 # Triad: architecture and implementation plan
 
-Deep-research notes for building one deployable system out of **Strix** (discovery),
-**Cairn** (exploitation) and **Hermes** (orchestration), following the reference
-architecture described in the Gambit campaign write-up.
+Deep-research notes for building one deployable system out of **Strix** (discovery)
+and **Cairn** (exploitation), with **Hermes** available as an optional orchestration
+layer on top, following the reference architecture in the Gambit campaign write-up.
+
+**Dependency shape.** The normal flow is `triad.py` driving Strix, feeding the Cairn
+graph, then reporting. That path imports the `plugin/` package directly and never
+loads Hermes. Hermes supplies the control plane in 2.3, and the codebase treats it
+like a dashboard: useful, optional, absent by default. `install.sh` installs it only
+with `--with-hermes`, and skips the plugin wiring when it is not there.
 
 Everything below was verified against the actual software: Cairn was cloned and its
 server run locally, its REST lifecycle exercised end to end, Strix's installed CLI
@@ -43,7 +49,7 @@ Three specific paper cuts from that campaign map directly onto controls we build
 
 ---
 
-## 2. The three components as they actually are (verified)
+## 2. The components as they actually are (verified)
 
 ### Strix: `usestrix/strix`, Apache-2.0, PyPI `strix-agent`
 
@@ -95,9 +101,13 @@ GET|PUT /settings         {intent_timeout, reason_timeout}
   exploration write against a stopped project is rejected (`Project is stopped`).
   Hints are still accepted while stopped or completed.
 
-### Hermes: Nous Research, the framework this runs on
+### Hermes (optional): Nous Research, the orchestration layer
 
-- Control plane surfaces we use:
+Nothing in the flow above needs this section. It describes what the optional layer
+adds when it is installed, and the code is structured so its absence changes no
+behaviour in `triad.py`.
+
+- Control plane surfaces, used only when Hermes is present:
   - **Plugin system**: `ctx.register_tool(name, toolset, schema, handler)` puts tools
     in the registry; `ctx.register_hook("post_tool_call", fn)` gives the audit trail.
   - **MCP client**: `mcp_servers:` in `config.yaml`, tools surface as `mcp_<server>_<tool>`.
@@ -119,12 +129,17 @@ risk level, scope limits and expected side effects. `risk_level: destructive`
 requires human approval. That is the software-enforced version of "ask before you
 write", not a prompt asking the model to be careful.
 
-### 3.2 Two integration surfaces, chosen deliberately
+### 3.2 Integration surfaces (the Hermes ones are optional)
 
-- **Hermes → Cairn: REST, via the `cairn_*` plugin tools.** The control plane reasons
-  about the graph (open intents, dead ends, path to goal) and writes hints/intents.
-  It does not need the graph as chat context; it needs typed operations.
-- **Hermes/Strix → Cairn: MCP (`mcp/cairn_mcp.py`).** One bridge, two consumers. This
+- **`triad.py` → everything: direct import.** The driver is the baseline surface. It
+  loads `plugin/cairn.py` and `plugin/strix.py` as plain modules and calls them. No
+  agent framework, no MCP, no plugin host: this is what makes Hermes optional rather
+  than load-bearing.
+- **Hermes → Cairn: REST, via the `cairn_*` plugin tools** (optional). The control
+  plane reasons about the graph (open intents, dead ends, path to goal) and writes
+  hints/intents. It does not need the graph as chat context; it needs typed operations.
+- **Strix or Hermes → Cairn: MCP (`mcp/cairn_mcp.py`)** (optional). One bridge, two
+  consumers. This
   is the cheapest way to make the blackboard a native tool surface for both the
   orchestrator and the scanning agent, and it lets you restrict Strix to the
   **read-only subset** (`cairn_list_projects`, `cairn_get_project`, `cairn_export`,
@@ -147,7 +162,7 @@ write", not a prompt asking the model to be careful.
                -> one Hint per finding, one Intent per critical/high/medium,
                   anchored on `origin` (or a better fact if one exists)
 5. exploit     Cairn workers claim intents and push the graph toward `goal`
-               Hermes only: poll cairn_graph, add cairn_hint for context the
+               optional (Hermes): poll cairn_graph, add cairn_hint for context
                workers lack, and gate any write action
 6. validate    cairn_graph(project_id, format="path") -> origin -> ... -> goal
                a `completed` status is a CLAIM; unsupported -> cairn_reopen
@@ -183,9 +198,10 @@ get host networking (that is Cairn's design, and it is also why the egress proxy
 matters; see below). Data is a single SQLite file under `./datas/cairn/`, so backup
 and "move the engagement to another box" are file copies.
 
-Hermes stays on the host rather than in a container: it needs the gateway, the
-skills, the plugin directory and the LLM credentials that are already configured
-there. `make plugin` symlinks the plugin in; the MCP block goes in `config.yaml`.
+When Hermes is used, it stays on the host rather than in a container: it needs the
+gateway, the skills, the plugin directory and the LLM credentials already configured
+there. `make plugin` symlinks `plugin/` in; the MCP block goes in `config.yaml`.
+Neither step exists in the Strix + Cairn flow.
 
 ### 4.2 arm64 / no-Docker fallback
 
@@ -212,9 +228,10 @@ host you control, on a network you control, inside an authorized engagement.
 
 ## 5. Phased build plan
 
-**Phase 0: stand it up (half a day).** Clone Cairn, `make bootstrap`, `make up`,
-`make plugin`. Verify `curl :8000/projects` and that Hermes sees `cairn_*` tools.
-Everything in this repo is built to make phase 0 the whole setup.
+**Phase 0: stand it up (half a day).** Clone Cairn, `make bootstrap`, `make up`.
+Verify `curl :8000/projects`, then run `triad.py status`. Everything in this repo is
+built to make phase 0 the whole setup. Add `--with-hermes` and `make plugin` only if
+you want the optional control plane.
 
 **Phase 1: one target, tool-call driven (a day).** Pick a deliberately vulnerable
 target you own (DVWA/Juice Shop). Run the loop by hand from a Hermes session:
@@ -222,7 +239,7 @@ create → scan → read → feed → watch → validate. The goal is to learn w
 handoff is lossy. Do **not** automate yet.
 
 **Phase 2: close the loop (2–3 days).** Wrap the loop in a Hermes cron job
-(`hermes/config-snippets.yaml`) that iterates engagements, re-scans stale targets,
+(`integrations/hermes/config-snippets.yaml`) that iterates engagements, re-scans stale targets,
 and posts a digest. Add the approval gate in the gateway and the cost ledger.
 
 **Phase 3: harden (ongoing).** Egress proxy with a generated allowlist from the

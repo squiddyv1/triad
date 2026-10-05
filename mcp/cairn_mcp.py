@@ -21,8 +21,8 @@ import os
 import sys
 from pathlib import Path
 
-# reuse the plugin's stdlib-only Cairn client
-_PLUGIN = Path(__file__).resolve().parent.parent / "hermes" / "plugin-triad"
+# reuse the tool package's stdlib-only Cairn client
+_PLUGIN = Path(__file__).resolve().parent.parent / "plugin"
 sys.path.insert(0, str(_PLUGIN))
 from cairn import Cairn, CairnError  # noqa: E402
 

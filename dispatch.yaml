@@ -1,7 +1,8 @@
 # Triad dispatcher config (container mode).
 # Model routing follows the lesson from the campaign write-up: put the cheap model
 # on the high-volume `explore` loop, the strong model on `reason`/`bootstrap`
-# (the decision points), and keep the orchestrator (Hermes) on the strongest.
+# (the decision points), and, when the optional orchestrator is running, keep it on
+# the strongest.
 
 server: "http://cairn-server:8000"
 

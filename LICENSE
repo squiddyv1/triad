@@ -34,9 +34,9 @@ each under its own license, and `install.sh` clones one of them for you:
   the file it patches. If you redistribute a patched Cairn, the AGPL applies to it.
 - **Strix**: https://github.com/usestrix/strix, **Apache-2.0**. Installed
   separately; not bundled here.
-- **Hermes Agent**: https://github.com/NousResearch/hermes-agent. See its
-  repository for licensing. Loads the plugin in `hermes/plugin-triad/`, which is
-  MIT as above.
+- **Hermes Agent**: https://github.com/NousResearch/hermes-agent. Optional: the
+  normal flow runs without it. When installed, it loads the `plugin/` directory,
+  which is MIT as above.
 
 Nothing in this repository is malware, and nothing here was written to target
 systems without authorization. See the Authorization section of README.md.

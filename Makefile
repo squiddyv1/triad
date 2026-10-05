@@ -24,10 +24,16 @@ logs: ## Tail dispatcher logs
 ps: ## Show project status
 	@curl -s http://127.0.0.1:8000/projects | python3 -m json.tool
 
-plugin: ## Symlink the triad plugin into the active Hermes profile
+plugin: ## Symlink the tool package into the active Hermes profile (optional layer)
+	@if ! command -v hermes >/dev/null 2>&1 && [ ! -x "$(HOME)/.local/bin/hermes" ]; then \
+	  echo "Hermes is not installed; it is optional. The CLI needs no plugin:"; \
+	  echo "  ./triad.py --help"; \
+	  echo "To add the layer: ./install.sh --with-hermes"; \
+	  exit 0; \
+	fi
 	@mkdir -p $(HERMES_PLUGINS)
-	@ln -sfn $(PWD)/hermes/plugin-triad $(HERMES_PLUGINS)/triad
-	@hermes plugins doctor $(PWD)/hermes/plugin-triad || true
+	@ln -sfn $(PWD)/plugin $(HERMES_PLUGINS)/triad
+	@hermes plugins doctor $(PWD)/plugin || true
 
 stop-all: ## KILL SWITCH: hard-stop every Cairn project
 	@for id in $$(curl -s http://127.0.0.1:8000/projects | python3 -c 'import json,sys;print(" ".join(p["id"] for p in json.load(sys.stdin)))'); do \

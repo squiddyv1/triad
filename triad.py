@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""triad: command-line driver for the Strix + Cairn + Hermes stack.
+"""triad: command-line driver for the Strix + Cairn stack.
 
-Composes the same operations the Hermes plugin exposes as tools, so the whole
-engagement loop can run headless (CI, cron, a dry run) as well as from a Hermes
-session.
+This is the normal entry point, and it needs no agent framework: it loads the
+`plugin/` package directly. Hermes, when installed, exposes that same package as
+tools, so the engagement loop can equally run from a chat session.
 
     python3 triad.py engage  --title ACME --target https://app.example --goal "admin access" \
                              --roe contracts/roe-instructions.md
@@ -32,31 +32,28 @@ from pathlib import Path
 def _repo_root() -> Path:
     """Locate the harness root.
 
-    Order: $TRIAD_HOME, then upward from this file, then the Hermes plugin dir.
-    Keeps `triad` working whether it is run from a clone, through the installed
-    wrapper in ~/.local/bin, or from anywhere on PATH.
+    Order: $TRIAD_HOME, then upward from this file. Deliberately does not look
+    under $HERMES_HOME: the normal flow is Strix -> Cairn and has no Hermes
+    dependency, so nothing here should require a Hermes install to exist.
     """
     env = os.environ.get("TRIAD_HOME")
     if env:
         return Path(env).expanduser().resolve()
     here = Path(__file__).resolve().parent
     for cand in (here, *here.parents):
-        if (cand / "hermes" / "plugin-triad" / "cairn.py").is_file():
+        if (cand / "plugin" / "cairn.py").is_file():
             return cand
-    hermes_home = Path(os.environ.get("HERMES_HOME", "~/.hermes")).expanduser()
-    if (hermes_home / "plugins" / "triad" / "cairn.py").is_file():
-        return hermes_home / "plugins" / "triad"
     return here
 
 
 REPO = _repo_root()
-_PLUGIN = REPO / "hermes" / "plugin-triad"
+_PLUGIN = REPO / "plugin"
 if not (_PLUGIN / "cairn.py").is_file():
-    _PLUGIN = REPO  # installed as the plugin directory itself
+    _PLUGIN = REPO
 
 
 def _load_plugin_modules():
-    """Import cairn.py / strix.py from the Hermes plugin without installing it."""
+    """Import cairn.py / strix.py from the tool package without installing it."""
     pkg = types.ModuleType("triad_plugin")
     pkg.__path__ = [str(_PLUGIN)]
     sys.modules["triad_plugin"] = pkg

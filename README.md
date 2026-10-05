@@ -1,35 +1,41 @@
-# Triad: one deployable system over Strix + Cairn + Hermes
+# Triad: one deployable system over Strix and Cairn
 
-Discovery, exploitation and orchestration as three layers with clean handoffs,
-run by a single agent control plane.
+Discovery and exploitation as two layers with a clean handoff, driven by one
+command-line tool. Hermes is an optional third layer, never a requirement.
 
 ```
-        ┌───────────────────────────────────────────────────────────┐
-        │  HERMES  : control plane (orchestration, memory, skills,   │
-        │           cron, approvals, audit, kill switch)             │
-        └───────────┬──────────────────────────────┬────────────────┘
-        tools: strix_*                         tools: cairn_*
-                    │                              │
-        ┌───────────▼──────────┐      ┌────────────▼──────────────────┐
-        │  STRIX               │      │  CAIRN                        │
-        │  discovery           │─────▶│  exploitation / state search  │
-        │  Docker sandbox      │ feed │  server :8000 + dispatcher    │
-        │  strix_runs/<run>/   │      │  Fact / Intent / Hint graph   │
-        └──────────────────────┘      └───────────────────────────────┘
-             read authority                  write authority
+        ┌─────────────────────────────────────────────────────────────────────────┐
+        │ triad  CLI: engage, scan, feed, watch, report, status                   │
+        │                                                                         │
+        │ Hermes is optional: control plane, skills, memory,                      │
+        │ approvals, kill switch. It is never required.                           │
+        └─────────────────────────────────────────────────────────────────────────┘
+
+        ┌────────────────────────┐         ┌────────────────────────────────────┐
+        │ STRIX                  │         │ CAIRN                              │
+        │ discovery              │         │ exploitation / state search        │
+        │ Docker sandbox         │──feed──▶│ server :8000 + dispatcher          │
+        │ strix_runs/<run>/      │         │ Fact / Intent / Hint graph         │
+        └────────────────────────┘         └────────────────────────────────────┘
+        strix_*                            cairn_*
+              read authority                          write authority
 ```
 
-- **Strix**: autonomous pentest agent, Docker sandbox, validated findings.
-  Produces `strix_runs/<run>/{vulnerabilities.json, findings.sarif, run.json}`.
+- **Strix**: autonomous pentest agent in a Docker sandbox. Produces
+  `strix_runs/<run>/{vulnerabilities.json, findings.sarif, run.json}`.
 - **Cairn** ([oritera/Cairn](https://github.com/oritera/Cairn)): blackboard
   Fact/Intent state-space search engine with a REST API. Give it `origin` + `goal`
   and its workers explore toward the goal. This is the layer that touches the target.
-- **Hermes** owns the control plane: the loop, the policy, the budget, the approvals,
-  the audit trail, plus skills and memory so an engagement improves every run.
+- **`triad`** (this repo): the driver. It seeds the Cairn graph from Strix output,
+  reads the graph back, and writes the report. It loads the same `plugin/` package
+  the Hermes integration uses, directly, so no agent framework is needed to run it.
+- **Hermes** (optional): adds orchestration on top: the loop, policy, budget,
+  approvals, audit trail, plus skills and memory so an engagement improves between
+  runs. Installed only with `--with-hermes`; everything else works without it.
 
-Reasoning, verified API notes, failure modes and the build plan:
-**[ARCHITECTURE.md](ARCHITECTURE.md)**.
-
+The normal flow is `triad.py engage` -> Strix scan -> `triad.py feed` -> Cairn
+dispatcher -> `triad.py report`. Reasoning, verified API notes, failure modes and
+the build plan: **[ARCHITECTURE.md](ARCHITECTURE.md)**.
 ---
 
 ## Install
@@ -40,18 +46,19 @@ cd triad
 ./install.sh
 ```
 
-`install.sh` is idempotent and installs **all three layers**: whatever is already
-present is left alone, whatever is missing is installed:
+`install.sh` is idempotent: it installs the two layers the normal flow needs, and
+wires the third only if you ask.
 
 | Layer | Default behaviour |
 |---|---|
-| **Triad harness** (plugin, CLI, contracts) | install |
+| **Triad harness** (tool package, CLI, contracts) | install |
 | **Cairn** (`oritera/Cairn`, cloned + patched) | install |
-| **Strix** | install if missing |
-| **Hermes** | install if missing |
+| **Strix** | install if missing (the flow needs it) |
+| **Hermes** (optional) | install only with `--with-hermes`; if already present, the plugin is linked |
 
-Strix and Hermes are installed with **the exact commands their own repositories
-document**, so this follows the official route rather than inventing one:
+Strix is installed with **the exact command its repository documents**, so this
+follows the official route rather than inventing one. Hermes, when you ask for it,
+goes through its own installer the same way:
 
 ```
 Strix   curl -sSL https://strix.ai/install | bash                          -> ~/.strix/bin/strix
@@ -65,16 +72,19 @@ Same bytes, same installer.
 What it does, in order:
 
 1. checks prerequisites and reports exactly what is missing;
-2. installs Strix and Hermes if they are absent (see the method knobs below);
+2. installs Strix if it is absent (see the method knobs below);
 3. clones Cairn and applies `patches/0001-opencode-worker-backend.patch`
    (upstream Cairn is never vendored into this repo);
 4. creates `.env` from `.env.example` and the engagement directory;
-5. symlinks the Hermes plugin into `$HERMES_HOME/plugins/triad` and validates it
-   with `hermes plugins doctor`;
-6. installs a `triad` wrapper into `~/.local/bin` so the CLI works from anywhere.
+5. installs a `triad` wrapper into `~/.local/bin` so the CLI works from anywhere;
+6. only if Hermes is present, or `--with-hermes` was passed: symlinks `plugin/`
+   into `$HERMES_HOME/plugins/triad` and validates it with `hermes plugins doctor`.
+   Otherwise it reports that Hermes is absent and moves on, because the CLI drives
+   the same package directly.
 
 ```bash
-./install.sh                 # install / repair everything
+./install.sh                 # install / repair Strix + Cairn; leave Hermes alone
+./install.sh --with-hermes   # also install Hermes and wire the plugin
 ./install.sh --detect-only   # report what is present, install nothing
 ./install.sh --check         # verify install health, change nothing
 ./install.sh --uninstall     # remove the symlinks it created (leaves Strix/Hermes alone)
@@ -114,7 +124,7 @@ Every path is overridable, so nothing is machine-specific:
 | Python | ≥ 3.9 for the CLI (the installer checks) |
 | Strix | Docker running; `pipx install strix-agent` or `curl -sSL https://strix.ai/install \| bash`; an LLM key |
 | Cairn | `uv` (the installer checks) + Docker **and the `docker compose` v2 plugin** for container mode, **or** local mode reusing a host worker CLI |
-| Hermes | a Hermes install; `mcp<2` for the MCP bridge (`uv run --with 'mcp<2'`) |
+| Hermes (optional) | a Hermes install, only for the control plane; `mcp<2` for the MCP bridge (`uv run --with 'mcp<2'`) |
 
 ---
 
@@ -131,8 +141,7 @@ cd cairn && uv run --project cairn cairn dispatch --config ../dispatch.local.yam
 The server and the dispatcher are **separate processes**, and a project will not
 move until the dispatcher is running.
 
-Then either talk to Hermes (the plugin exposes `cairn_*` / `strix_*` tools), or
-drive it headlessly:
+Drive it headlessly. This is the normal flow, and it needs no Hermes:
 
 ```bash
 triad engage --title ACME --target https://app.example \
@@ -145,8 +154,12 @@ triad watch  --project proj_001 --timeout 1800
 triad report --project proj_001 --workdir ~/engagements/acme -o report.md
 ```
 
-Emergency stop for every project: `make stop-all`, or
-`cairn_status(project_id, "stopped")` one message away in the gateway.
+If Hermes is installed, the plugin exposes this same package as `cairn_*` and
+`strix_*` tools, so a chat session drives exactly these calls. That path is
+convenience, not a dependency.
+
+Emergency stop for every project: `make stop-all`. With the Hermes gateway,
+`cairn_status(project_id, "stopped")` is one message away.
 
 ---
 
@@ -163,10 +176,15 @@ triad/
 ├── contracts/
 │   ├── finding.schema.json    the layer-to-layer handoff object
 │   └── roe-instructions.md    rules-of-engagement template
-├── hermes/plugin-triad/       Hermes plugin: strix_* + cairn_* tools + the loop skill
-├── hermes/config-snippets.yaml  MCP + cron + gateway wiring
-└── mcp/cairn_mcp.py           Cairn as an MCP server (Hermes *and* Strix can use it)
+├── plugin/                    the tool package: strix_* / cairn_* tools + the loop skill
+│   └── skills/triad-engagement/SKILL.md
+├── integrations/hermes/config-snippets.yaml  MCP + cron + gateway wiring (optional)
+└── mcp/cairn_mcp.py           Cairn as an MCP server (Strix *or* Hermes can use it)
 ```
+
+`plugin/` is a plain Python package: `triad.py` imports it directly, and Hermes
+loads the same directory as a plugin when it is installed. `integrations/` holds
+the Hermes-only wiring and is inert otherwise.
 
 `cairn/` appears after install and is gitignored.
 
@@ -194,10 +212,12 @@ This repo adds a fifth: `opencode`.
 
 ## Known constraints
 
-- **Hermes needs several GB.** Its installer unpacks Python, Node, npm, ripgrep and
-  FFmpeg into `$HERMES_HOME/tools` and clones the agent; a fresh install lands
-  around 7 GB. `install.sh` checks for 4 GB free under `$HOME` first and refuses
-  early with a clear reason rather than dying halfway through the download.
+- **The optional Hermes layer needs several GB.** Its installer unpacks Python, Node,
+  npm, ripgrep and FFmpeg into `$HERMES_HOME/tools` and clones the agent; a fresh
+  install lands around 7 GB. `install.sh` checks for 4 GB free under `$HOME` first
+  and refuses early with a clear reason rather than dying halfway through the
+  download. This is the main reason Hermes is opt-in: the Strix + Cairn flow needs
+  a fraction of that.
 - **The `goal` string is the autonomy boundary.** A goal one finding can satisfy buys
   you one finding: the reason step completes the project and the remaining intents sit
   stranded. Scope it up front ("conclude or rule out every module") rather than

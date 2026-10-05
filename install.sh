@@ -1,8 +1,13 @@
 #!/usr/bin/env bash
 #
-# Triad installer: Strix (discovery) + Cairn (exploitation) + Hermes (control plane).
+# Triad installer: Strix (discovery) + Cairn (exploitation).
 #
-#   ./install.sh                 install everything (all three layers)
+# The normal flow is Strix -> Cairn and needs neither Hermes nor Docker images
+# beyond Strix's sandbox. Hermes is an optional extra layer (orchestration,
+# skills, gateway approvals) and is never installed unless you ask for it.
+#
+#   ./install.sh                 install Strix + Cairn, wire Hermes only if present
+#   ./install.sh --with-hermes   also install Hermes if it is missing
 #   ./install.sh --detect-only   report what is present, install nothing
 #   ./install.sh --check         verify an existing install, change nothing
 #   ./install.sh --uninstall     remove the symlinks this script created
@@ -20,7 +25,7 @@ ENGAGEMENTS="${ENGAGEMENTS:-$HOME/engagements}"
 
 CAIRN_REPO="${CAIRN_REPO:-https://github.com/oritera/Cairn.git}"
 PATCH="$TRIAD_HOME/patches/0001-opencode-worker-backend.patch"
-PLUGIN_SRC="$TRIAD_HOME/hermes/plugin-triad"
+PLUGIN_SRC="$TRIAD_HOME/plugin"
 PLUGIN_DST="$HERMES_HOME/plugins/triad"
 
 # Official installers, used only as a fallback when no package manager is present.
@@ -30,15 +35,19 @@ HERMES_INSTALL_URL="https://hermes-agent.nousresearch.com/install.sh"
 MODE="install"
 # Installing the missing layers is the default; --detect-only turns it off.
 INSTALL_METHOD="${TRIAD_INSTALL_METHOD:-official}"
+# Hermes is optional: only installed when explicitly requested.
+WITH_HERMES=0
 for arg in "$@"; do
   case "$arg" in
     --check)        MODE="check" ;;
     --uninstall)    MODE="uninstall" ;;
     --detect-only|--no-deps)
                     INSTALL_METHOD="none" ;;
-    --with-strix|--with-hermes|--all)
-                    : ;;   # now the default; accepted for compatibility
-    -h|--help)      sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    --with-hermes|--all)
+                    WITH_HERMES=1 ;;
+    --with-strix)
+                    : ;;   # Strix is part of the normal flow and installs anyway
+    -h|--help)      sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *)              echo "unknown option: $arg (try --help)" >&2; exit 2 ;;
   esac
 done
@@ -48,6 +57,8 @@ warn() { printf '  \033[33m!\033[0m %s\n' "$*"; }
 err()  { printf '  \033[31m✗\033[0m %s\n' "$*" >&2; }
 hdr()  { printf '\n\033[1m%s\033[0m\n' "$*"; }
 have() { command -v "$1" >/dev/null 2>&1; }
+strix_present()  { have strix  || [ -x "$HOME/.strix/bin/strix" ]; }
+hermes_present() { have hermes || [ -x "$HOME/.local/bin/hermes" ]; }
 # Default is `official`: each project's own installer, fetched to a temp file and
 # hashed rather than piped blindly. See README.md for the URLs and `pkg`.
 
@@ -122,7 +133,7 @@ install_layer() {
 }
 
 ensure_strix() {
-  if have strix || [ -x "$HOME/.strix/bin/strix" ]; then ok "strix already installed"; return 0; fi
+  if strix_present; then ok "strix already installed"; return 0; fi
   local rc=0
   install_layer strix-agent "$STRIX_INSTALL_URL" \
                 "${STRIX_INSTALL_METHOD:-$INSTALL_METHOD}" strix Strix || rc=$?
@@ -131,7 +142,7 @@ ensure_strix() {
 }
 
 ensure_hermes() {
-  if have hermes || [ -x "$HOME/.local/bin/hermes" ]; then ok "hermes already installed"; return 0; fi
+  if hermes_present; then ok "hermes already installed"; return 0; fi
   # The vendor installer unpacks Python, Node, npm, ripgrep and FFmpeg into
   # $HERMES_HOME/tools: several GB, so check first and fail fast instead.
   local need_mb=4096 avail_mb
@@ -155,7 +166,7 @@ if [ "$MODE" = "uninstall" ]; then
   [ -L "$PLUGIN_DST" ] && rm -f "$PLUGIN_DST" && ok "removed plugin symlink $PLUGIN_DST"
   [ -f "$BIN_DIR/triad" ] && rm -f "$BIN_DIR/triad" && ok "removed $BIN_DIR/triad"
   warn "kept: $CAIRN_DIR, $TRIAD_HOME/.env, $ENGAGEMENTS (delete manually if you want them gone)"
-  warn "Strix and Hermes are separate installs; this does not touch them"
+  warn "Strix and Hermes are separate installs; this never touches them"
   exit 0
 fi
 # Prerequisites.
@@ -186,16 +197,19 @@ else warn "neither uv nor pipx; Cairn needs uv: https://docs.astral.sh/uv/gettin
 
 if [ "$MODE" = "check" ]; then
   refresh_path
-  if have strix || [ -x "$HOME/.strix/bin/strix" ]; then ok "strix present"; else warn "strix not found"; fi
-  if have hermes || [ -x "$HOME/.local/bin/hermes" ]; then ok "hermes present"; else warn "hermes not found"; fi
+  if strix_present; then ok "strix present"; else warn "strix not found"; fi
+  # Hermes is optional: its absence is not an install problem.
+  if hermes_present; then ok "hermes present (optional layer)"
+  else warn "hermes not installed; the optional control plane is unavailable"; fi
 else
   # Reported here; installed a few lines below, once the hard failures clear.
-  if have strix || [ -x "$HOME/.strix/bin/strix" ]; then ok "strix present"
+  if strix_present; then ok "strix present"
   else warn "strix missing; will install it ($INSTALL_METHOD)"; fi
-  if have hermes || [ -x "$HOME/.local/bin/hermes" ]; then ok "hermes present"
-  else warn "hermes missing; will install it ($INSTALL_METHOD)"; fi
+  if hermes_present; then ok "hermes present (optional layer)"
+  elif [ "$WITH_HERMES" = 1 ]; then warn "hermes missing; --with-hermes, will install it ($INSTALL_METHOD)"
+  else warn "hermes not installed; optional, pass --with-hermes to add it"; fi
   if [ -d "$HERMES_HOME" ]; then ok "Hermes home: $HERMES_HOME"
-  elif [ "$INSTALL_METHOD" = "none" ]; then warn "no Hermes home at $HERMES_HOME; --detect-only, so nothing was installed"; fi
+  elif [ "$INSTALL_METHOD" = "none" ]; then warn "no Hermes home at $HERMES_HOME"; fi
 fi
 
 if [ "$MODE" = "check" ]; then
@@ -208,7 +222,14 @@ if [ "$MODE" = "check" ]; then
       err "opencode backend patch NOT applied"; FAIL=1
     fi
   fi
-  if [ -e "$PLUGIN_DST" ]; then ok "Hermes plugin linked at $PLUGIN_DST"; else err "Hermes plugin not linked"; FAIL=1; fi
+  # The plugin link only matters when Hermes is installed; without it, skipping
+  # the link is correct rather than a failure.
+  if hermes_present; then
+    if [ -e "$PLUGIN_DST" ]; then ok "Hermes plugin linked at $PLUGIN_DST"
+    else err "Hermes plugin not linked (Hermes is present)"; FAIL=1; fi
+  else
+    ok "Hermes absent; plugin link not required"
+  fi
   if [ -x "$BIN_DIR/triad" ]; then ok "triad CLI at $BIN_DIR/triad"; else err "triad CLI missing at $BIN_DIR/triad"; FAIL=1; fi
   if [ -f "$TRIAD_HOME/.env" ]; then ok ".env present"; else warn ".env missing (copy .env.example and fill it in)"; fi
   if command -v python3 >/dev/null 2>&1 && "$BIN_DIR/triad" --help >/dev/null 2>&1; then
@@ -221,10 +242,17 @@ if [ "$MODE" = "check" ]; then
 fi
 
 [ "$FAIL" = 0 ] || { echo; err "fix the errors above, then re-run."; exit 1; }
-# Strix + Hermes: install whatever is missing.
-hdr "Strix and Hermes"
+#
+# Strix: install it if missing. It is the discovery layer, so the normal
+# Strix -> Cairn flow depends on it.
+hdr "Strix (discovery layer)"
 ensure_strix   || warn "Strix is not installed; the discovery layer will be unavailable"
-ensure_hermes  || warn "Hermes is not installed; the control plane will be unavailable"
+# Hermes: optional, and only touched when asked for. Rather than a no-op flag,
+# this is the one place the control plane gets installed.
+if [ "$WITH_HERMES" = 1 ] && [ "$INSTALL_METHOD" != "none" ]; then
+  hdr "Hermes (optional control plane)"
+  ensure_hermes || warn "Hermes is not installed; the optional control plane will be unavailable"
+fi
 # Cairn checkout + backend patch.
 hdr "Cairn (exploitation layer)"
 if [ -d "$CAIRN_DIR/.git" ]; then
@@ -257,20 +285,27 @@ else
 fi
 mkdir -p "$TRIAD_HOME/datas/cairn"
 ok "engagements: $ENGAGEMENTS"
-# Hermes plugin.
-hdr "Hermes plugin"
-mkdir -p "$HERMES_HOME/plugins"
-if [ -L "$PLUGIN_DST" ] || [ -d "$PLUGIN_DST" ]; then
-  rm -rf "$PLUGIN_DST"
-fi
-ln -s "$PLUGIN_SRC" "$PLUGIN_DST"
-ok "linked $PLUGIN_DST -> $PLUGIN_SRC"
+# Hermes plugin, only when Hermes is actually present. Without Hermes this
+# section is skipped entirely: the `triad` CLI drives the same code directly.
+if hermes_present; then
+  hdr "Hermes plugin (optional)"
+  mkdir -p "$HERMES_HOME/plugins"
+  if [ -L "$PLUGIN_DST" ] || [ -d "$PLUGIN_DST" ]; then
+    rm -rf "$PLUGIN_DST"
+  fi
+  ln -s "$PLUGIN_SRC" "$PLUGIN_DST"
+  ok "linked $PLUGIN_DST -> $PLUGIN_SRC"
 
-DOCTOR_OUT="$(hermes plugins doctor "$PLUGIN_SRC" 2>&1 || true)"
-if printf '%s' "$DOCTOR_OUT" | grep -q "registration passed"; then
-  ok "plugin validates ($(printf '%s' "$DOCTOR_OUT" | sed -n 's/.*registrations: //p'))"
+  DOCTOR_OUT="$(hermes plugins doctor "$PLUGIN_SRC" 2>&1 || true)"
+  if printf '%s' "$DOCTOR_OUT" | grep -q "registration passed"; then
+    ok "plugin validates ($(printf '%s' "$DOCTOR_OUT" | sed -n 's/.*registrations: //p'))"
+  else
+    warn "could not validate the plugin with \`hermes plugins doctor\` ; run it yourself once Hermes is on PATH"
+  fi
 else
-  warn "could not validate the plugin with \`hermes plugins doctor\` ; run it yourself once Hermes is on PATH"
+  hdr "Hermes plugin (skipped)"
+  ok "Hermes is not installed; nothing to wire. The CLI is the normal entry point."
+  ok "add it later with: ./install.sh --with-hermes"
 fi
 # CLI wrapper.
 hdr "CLI"
@@ -297,7 +332,20 @@ cat <<EOF
   2. Start Cairn:                 cd $TRIAD_HOME && make up        # or: docker compose up -d
   3. Start the dispatcher:        cd $CAIRN_DIR && \\
        uv run --project cairn cairn dispatch --config $TRIAD_HOME/dispatch.local.yaml
-  4. Restart Hermes so the plugin + MCP tools load, then talk to it.
+  4. Run the flow:                triad engage --title ... --target ... --goal ...
+                                  (or: ./triad.py --help)
+EOF
+if hermes_present; then
+  cat <<EOF
+  5. Optional: restart Hermes so the plugin + MCP tools load, then talk to it.
+EOF
+else
+  cat <<EOF
+  5. Hermes is not installed and is not needed. To add the optional control
+     plane later: ./install.sh --with-hermes
+EOF
+fi
+cat <<EOF
 
   Verify at any time:             ./install.sh --check
   Full walkthrough:               $TRIAD_HOME/README.md
