@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="Triad">
+  <!--
+    Triad mark: three components around one flow.
+    Solid edge, Strix to Cairn, is the path that does the work; the dashed ones are the
+    optional control layer. Colours match the banner and the README.
+  -->
+  <title>Triad</title>
+  <defs>
+    <linearGradient id="mark-bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#111d2b"/>
+      <stop offset="1" stop-color="#070a0f"/>
+    </linearGradient>
+    <radialGradient id="mark-glow" cx="50%" cy="40%" r="60%">
+      <stop offset="0" stop-color="#22d3ee" stop-opacity="0.28"/>
+      <stop offset="1" stop-color="#22d3ee" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="mark-edge" x1="0" y1="1" x2="1" y2="0">
+      <stop offset="0" stop-color="#22d3ee"/>
+      <stop offset="1" stop-color="#fbbf24"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="512" height="512" rx="112" fill="url(#mark-bg)"/>
+  <rect x="2" y="2" width="508" height="508" rx="110" fill="none" stroke="#22303f" stroke-width="3"/>
+  <circle cx="256" cy="228" r="196" fill="url(#mark-glow)"/>
+
+  <g transform="translate(22,22) scale(2.6)">
+    <!-- Hermes: present if you want it, which is what the dashes say -->
+    <line x1="50.2" y1="113" x2="90" y2="44" stroke="#a78bfa" stroke-width="3.2"
+          stroke-dasharray="7 6" stroke-linecap="round" opacity="0.7"/>
+    <line x1="50.2" y1="113" x2="129.8" y2="113" stroke="#a78bfa" stroke-width="3.2"
+          stroke-dasharray="7 6" stroke-linecap="round" opacity="0.7"/>
+
+    <!-- Strix feeds Cairn: the flow the whole project is about -->
+    <line x1="90" y1="44" x2="129.8" y2="113" stroke="url(#mark-edge)" stroke-width="6"
+          stroke-linecap="round"/>
+
+    <circle cx="90" cy="44" r="11.5" fill="#22d3ee"/>
+    <circle cx="129.8" cy="113" r="11.5" fill="#fbbf24"/>
+    <circle cx="50.2" cy="113" r="11.5" fill="#a78bfa"/>
+    <circle cx="90" cy="44" r="4.5" fill="#070a0f"/>
+    <circle cx="129.8" cy="113" r="4.5" fill="#070a0f"/>
+    <circle cx="50.2" cy="113" r="4.5" fill="#070a0f"/>
+  </g>
+</svg>

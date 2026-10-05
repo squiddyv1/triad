@@ -1,0 +1,72 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 340" width="1280" height="340" role="img" aria-label="Triad: autonomous security assessment from one command">
+  <!--
+    Monospace throughout so the text extents stay predictable without a font
+    measurement pass, and one accent per component.
+  -->
+  <title>Triad</title>
+  <defs>
+    <linearGradient id="bn-bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0b1420"/>
+      <stop offset="0.55" stop-color="#0a0f17"/>
+      <stop offset="1" stop-color="#0c1016"/>
+    </linearGradient>
+    <pattern id="bn-dots" width="26" height="26" patternUnits="userSpaceOnUse">
+      <circle cx="1.6" cy="1.6" r="1.6" fill="#1e293b" opacity="0.55"/>
+    </pattern>
+    <radialGradient id="bn-glow" cx="50%" cy="50%" r="50%">
+      <stop offset="0" stop-color="#22d3ee" stop-opacity="0.22"/>
+      <stop offset="1" stop-color="#22d3ee" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="bn-edge" x1="0" y1="1" x2="1" y2="0">
+      <stop offset="0" stop-color="#22d3ee"/>
+      <stop offset="1" stop-color="#fbbf24"/>
+    </linearGradient>
+    <linearGradient id="bn-rule" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#22d3ee" stop-opacity="0.9"/>
+      <stop offset="0.5" stop-color="#fbbf24" stop-opacity="0.75"/>
+      <stop offset="1" stop-color="#a78bfa" stop-opacity="0.15"/>
+    </linearGradient>
+    <clipPath id="bn-clip"><rect width="1280" height="340"/></clipPath>
+  </defs>
+
+  <rect width="1280" height="340" fill="url(#bn-bg)"/>
+  <rect width="1280" height="340" fill="url(#bn-dots)"/>
+  <!-- the glow is wider than the canvas on purpose; clip it so the file is in-bounds -->
+  <g clip-path="url(#bn-clip)">
+    <circle cx="166" cy="170" r="230" fill="url(#bn-glow)"/>
+  </g>
+
+  <!-- the mark, same construction as assets/logo.svg -->
+  <g transform="translate(76,80) scale(1.0)">
+    <rect width="180" height="180" rx="40" fill="#0c141f" stroke="#22303f" stroke-width="2"/>
+    <line x1="50.2" y1="113" x2="90" y2="44" stroke="#a78bfa" stroke-width="3.2"
+          stroke-dasharray="7 6" stroke-linecap="round" opacity="0.7"/>
+    <line x1="50.2" y1="113" x2="129.8" y2="113" stroke="#a78bfa" stroke-width="3.2"
+          stroke-dasharray="7 6" stroke-linecap="round" opacity="0.7"/>
+    <line x1="90" y1="44" x2="129.8" y2="113" stroke="url(#bn-edge)" stroke-width="6"
+          stroke-linecap="round"/>
+    <circle cx="90" cy="44" r="11.5" fill="#22d3ee"/>
+    <circle cx="129.8" cy="113" r="11.5" fill="#fbbf24"/>
+    <circle cx="50.2" cy="113" r="11.5" fill="#a78bfa"/>
+    <circle cx="90" cy="44" r="4.5" fill="#0c141f"/>
+    <circle cx="129.8" cy="113" r="4.5" fill="#0c141f"/>
+    <circle cx="50.2" cy="113" r="4.5" fill="#0c141f"/>
+  </g>
+
+  <g font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace">
+    <text x="300" y="140" font-size="88" font-weight="700" letter-spacing="12" fill="#e8eef6">TRIAD</text>
+    <text x="304" y="186" font-size="21" letter-spacing="0.6" fill="#8b9bad">autonomous security assessment from one command</text>
+    <text x="304" y="232" font-size="20" fill="#5c6b7d">
+      <tspan fill="#22d3ee">strix scan</tspan>
+      <tspan>  &#8594;  </tspan>
+      <tspan fill="#dbe4ee">feed</tspan>
+      <tspan>  &#8594;  </tspan>
+      <tspan fill="#fbbf24">cairn graph</tspan>
+      <tspan>  &#8594;  </tspan>
+      <tspan fill="#dbe4ee">report</tspan>
+    </text>
+    <text x="304" y="272" font-size="18" fill="#4b5866">Strix and Cairn do the work. Hermes is optional.</text>
+  </g>
+
+  <rect x="76" y="288" width="1128" height="3" rx="1.5" fill="url(#bn-rule)"/>
+</svg>

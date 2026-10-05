@@ -1,139 +1,92 @@
-# Triad: one deployable system over Strix and Cairn
+![Triad](assets/banner.svg)
 
-Discovery and exploitation as two layers with a clean handoff, driven by one
-command-line tool. Hermes is an optional third layer, never a requirement.
+<p align="center">
+  <b>Discovery, then exploitation, from one command.</b><br>
+  <sub>Strix finds. Cairn proves. <code>triad</code> connects the two. Hermes is optional.</sub>
+</p>
 
-```
-        ┌─────────────────────────────────────────────────────────────────────────┐
-        │ triad  CLI: engage, scan, feed, watch, report, status                   │
-        │                                                                         │
-        │ Hermes is optional: control plane, skills, memory,                      │
-        │ approvals, kill switch. It is never required.                           │
-        └─────────────────────────────────────────────────────────────────────────┘
+<p align="center">
+  <img alt="MIT license" src="https://img.shields.io/badge/license-MIT-3fb950">
+  <img alt="Python 3.9 or later" src="https://img.shields.io/badge/python-3.9%2B-3776ab">
+  <img alt="no agent framework required" src="https://img.shields.io/badge/agent%20framework-not%20required-8b949e">
+</p>
 
-        ┌────────────────────────┐         ┌────────────────────────────────────┐
-        │ STRIX                  │         │ CAIRN                              │
-        │ discovery              │         │ exploitation / state search        │
-        │ Docker sandbox         │──feed──▶│ server :8000 + dispatcher          │
-        │ strix_runs/<run>/      │         │ Fact / Intent / Hint graph         │
-        └────────────────────────┘         └────────────────────────────────────┘
-        strix_*                            cairn_*
-              read authority                          write authority
-```
-
-- **Strix**: autonomous pentest agent in a Docker sandbox. Produces
-  `strix_runs/<run>/{vulnerabilities.json, findings.sarif, run.json}`.
-- **Cairn** ([oritera/Cairn](https://github.com/oritera/Cairn)): blackboard
-  Fact/Intent state-space search engine with a REST API. Give it `origin` + `goal`
-  and its workers explore toward the goal. This is the layer that touches the target.
-- **`triad`** (this repo): the driver. It seeds the Cairn graph from Strix output,
-  reads the graph back, and writes the report. It loads the same `plugin/` package
-  the Hermes integration uses, directly, so no agent framework is needed to run it.
-- **Hermes** (optional): adds orchestration on top: the loop, policy, budget,
-  approvals, audit trail, plus skills and memory so an engagement improves between
-  runs. Installed only with `--with-hermes`; everything else works without it.
-
-The normal flow is one command: `triad engage` creates the Cairn project, runs the
-Strix scan, and feeds the findings into the graph as hints and intents. Cairn's
-dispatcher then works those leads, and `triad report` writes it up. Reasoning,
-verified API notes, failure modes and the build plan:
-**[ARCHITECTURE.md](ARCHITECTURE.md)**.
 ---
+
+## The idea
+
+Two layers with a clean handoff between them, driven by one CLI.
+
+| Layer | Job |
+|---|---|
+| **Strix** ([usestrix/strix](https://github.com/usestrix/strix)) | Autonomous pentest agent in a Docker sandbox. Writes `strix_runs/<run>/{vulnerabilities.json, findings.sarif, run.json}`. |
+| **Cairn** ([oritera/Cairn](https://github.com/oritera/Cairn)) | Blackboard search over a Fact/Intent graph. Give it an origin and a goal, and its workers explore toward it. This is the layer that touches the target. |
+| **`triad`** (this repo) | The driver. Seeds the Cairn graph from Strix output, reads the graph back, writes the report. |
+| **Hermes** (optional) | Orchestration on top: the loop, policy, budget, approvals, audit trail, plus skills and memory so an engagement improves between runs. |
+
+```text
+  STRIX  discovery, sandboxed, read authority  ──feed──▶  CAIRN  exploitation, credentialed, write authority
+```
+
+Strix never holds target credentials; Cairn never discovers. `triad engage` walks the
+whole path in one command: create the project, run the scan, post every finding into
+the graph as a hint and every actionable one as an intent, then let Cairn's dispatcher
+work the leads.
+
+Reasoning, API notes and failure modes: **[ARCHITECTURE.md](ARCHITECTURE.md)**.
 
 ## Install
 
 ```bash
-git clone https://github.com/squiddyv1/triad.git
-cd triad
+git clone https://github.com/squiddyv1/triad.git && cd triad
 ./install.sh
 ```
 
-`install.sh` is idempotent: it installs every layer the flow needs and wires the
-optional one only if you ask.
+Idempotent, and it installs the toolchain with **the exact commands each project
+publishes**, fetched to a temp file whose size and sha256 are printed before it runs
+rather than piped blind:
 
-| Layer | Default behaviour |
+```text
+uv        curl -LsSf https://astral.sh/uv/install.sh | sh                    -> ~/.local/bin/uv
+opencode  curl -fsSL https://opencode.ai/install | bash                    -> ~/.opencode/bin
+Docker    curl -fsSL https://get.docker.com | sh                            (needs root)
+Strix     curl -sSL https://strix.ai/install | bash                         -> ~/.strix/bin
+Hermes    curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash   (--with-hermes only)
+```
+
+It then creates `.env`, clones and patches Cairn, and puts a `triad` wrapper in
+`~/.local/bin`.
+
+| Flag | Effect |
 |---|---|
-| **uv** (Cairn's runner, and what `triad up` starts things with) | install if missing |
-| **opencode** (the worker CLI the dispatcher drives) | install if missing; `--no-worker` to only report |
-| **Docker** (daemon + compose v2) | install if missing; `--no-docker` to only report |
-| **Triad harness** (tool package, CLI, contracts) | install |
-| **Cairn** (`oritera/Cairn`, cloned + patched) | install |
-| **Strix** | install if missing (the flow needs it) |
-| **Hermes** (optional) | install only with `--with-hermes`; if already present, the plugin is linked |
+| `--with-hermes` | also install Hermes and wire the plugin |
+| `--no-docker`, `--no-uv`, `--no-worker` | only report that layer, do not install it |
+| `--check` | verify install health, change nothing |
+| `--detect-only` | report what is present, install nothing |
+| `--uninstall` | remove the symlinks it made (leaves Strix and Hermes alone) |
 
-Docker, uv, opencode and Strix are installed with **the exact commands their own
-docs publish**, so this follows the official route rather than inventing one.
-Hermes, when you ask for it, goes through its own installer the same way:
+**On Kali, Parrot, Mint or Pop:** Docker publishes packages for Debian and Ubuntu
+only, so its installer asks for a suite that does not exist (`debian kali-rolling`)
+and apt fails. The installer spots the derivative and uses the distro's own
+`docker.io` instead, which is what Kali documents, and it removes a broken
+`docker.list` left behind by a failed attempt so apt keeps working.
 
-```
-Docker    curl -fsSL https://get.docker.com | sh                              -> dockerd + compose v2
-uv        curl -LsSf https://astral.sh/uv/install.sh | sh                     -> ~/.local/bin/uv
-opencode  curl -fsSL https://opencode.ai/install | bash                      -> ~/.opencode/bin/opencode
-Strix     curl -sSL https://strix.ai/install | bash                           -> ~/.strix/bin/strix
-Hermes    curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash  -> ~/.hermes
-```
+Docker and uv are both installed when missing, since Cairn needs one of them.
+`UV_INSTALL_METHOD=none` and `DOCKER_INSTALL_METHOD=none` (or bare `--no-docker`,
+`--no-uv`) downgrade either to a report. An existing install is never touched.
 
-The only deviation is that the script is fetched to a temp file and its size and
-sha256 are printed before it runs, a reported one-liner instead of a blind pipe.
-Same bytes, same installer. Docker's needs root, so it runs under `sudo` (or
-directly when the installer is already root).
-
-What it does, in order:
-
-1. checks prerequisites and reports exactly what is missing;
-2. installs uv if it is absent (Cairn's runner, and what `triad up` uses);
-3. installs opencode if no worker CLI is present, since the dispatcher needs one
-   to claim intents;
-4. installs Docker if it is absent, starts the daemon, adds you to the `docker`
-   group and ensures the compose v2 plugin;
-5. installs Strix if it is absent (see the method knobs below);
-6. clones Cairn and applies `patches/0001-opencode-worker-backend.patch`
-   (upstream Cairn is never vendored into this repo);
-7. creates `.env` from `.env.example` and the engagement directory;
-8. installs a `triad` wrapper into `~/.local/bin` so the CLI works from anywhere;
-9. only if Hermes is present, or `--with-hermes` was passed: symlinks `plugin/`
-   into `$HERMES_HOME/plugins/triad` and validates it with `hermes plugins doctor`.
-   Otherwise it reports that Hermes is absent and moves on, because the CLI drives
-   the same package directly.
-
-```bash
-./install.sh                 # install / repair uv + Docker + Strix + Cairn; leave Hermes alone
-./install.sh --with-hermes   # also install Hermes and wire the plugin
-./install.sh --no-docker     # do not install Docker, only report whether it is there
-./install.sh --no-uv         # do not install uv, only report whether it is there
-./install.sh --no-worker     # do not install a worker CLI, only report whether one is there
-./install.sh --detect-only   # report what is present, install nothing
-./install.sh --check         # verify install health, change nothing
-./install.sh --uninstall     # remove the symlinks it created (leaves Strix/Hermes alone)
-```
-
-`uv` and Docker are both installed when missing, because Cairn cannot run without
-either; `UV_INSTALL_METHOD=none` and `--no-docker` (or `DOCKER_INSTALL_METHOD=none`)
-downgrade either one to a report. Both are idempotent, and an existing install is
-never touched.
-
-Docker publishes packages for Debian, Ubuntu, Raspbian, Fedora, the RHEL family,
-SLES and openSUSE only. On a derivative (Kali, Parrot, Mint, Pop) the vendor script
-asks for a suite that does not exist, for example `debian kali-rolling`, so the
-installer uses the distro's own `docker.io` instead, which is what Kali documents.
-If such an attempt left an unusable `docker.list` behind, that entry is removed so
-`apt` keeps working; a Docker source you configured yourself is left alone.
-
-### Install method
+<details>
+<summary>Install method and path overrides</summary>
 
 | `TRIAD_INSTALL_METHOD` | Behaviour |
 |---|---|
-| `official` (default) | the vendor script from each project's README (above); for Docker it is skipped on distros Docker does not publish for |
-| `pkg` | `uv tool install strix-agent` / `hermes-agent`, else `pipx`, then fall back to the vendor script; for Docker it is the distro's own packages (`docker.io`, `docker-ce`, `moby-engine`) |
+| `official` (default) | the vendor script above; for Docker it is skipped on distros Docker does not publish for |
+| `pkg` | `uv tool install strix-agent` / `hermes-agent`, else `pipx`, falling back to the vendor script; for Docker it is the distro's own packages |
 | `none` | detect only, never install |
 
-`STRIX_INSTALL_METHOD` / `HERMES_INSTALL_METHOD` override it per layer. `official`
-is the default because it is the route both projects support and it tracks their
-current releases; `pkg` produces a pinned, uninstallable install but **PyPI lags
-the vendor channel** (`hermes-agent` there is 0.19.0 while the official script
-tracks 0.21.x), so prefer `official` unless you specifically want the pinned one.
-
-Every path is overridable, so nothing is machine-specific:
+`STRIX_INSTALL_METHOD` and `HERMES_INSTALL_METHOD` override it per layer. Prefer
+`official`: PyPI lags the vendor channel (`hermes-agent` there is 0.19.0, the
+official script tracks 0.21.x).
 
 | Variable | Default | Meaning |
 |---|---|---|
@@ -143,82 +96,56 @@ Every path is overridable, so nothing is machine-specific:
 | `BIN_DIR` | `~/.local/bin` | where the `triad` CLI goes |
 | `ENGAGEMENTS` | `~/engagements` | engagements, scans, reports |
 
+</details>
+
 ### Prerequisites
 
 | Component | Needs |
 |---|---|
-| Python | ≥ 3.9 for the CLI (the installer checks) |
-| Docker | installed if missing by default: the daemon is started and the invoking user is added to the `docker` group; `--no-docker` to only report it |
-| Worker CLI | opencode is installed if none of opencode/claude/codex/pi is present. Its key goes into opencode's own credentials file (`triad setup` writes it, or `triad auth`), so no interactive login is needed |
-| Strix | Docker running; `pipx install strix-agent` or `curl -sSL https://strix.ai/install \| bash`; an LLM key |
-| Cairn | `uv` (installed if missing) + Docker **and the `docker compose` v2 plugin** for container mode, **or** local mode reusing a host worker CLI |
-| Hermes (optional) | a Hermes install, only for the control plane; `mcp<2` for the MCP bridge (`uv run --with 'mcp<2'`) |
+| Python | 3.9+ for the CLI (checked by the installer) |
+| Docker | installed if missing: daemon started, invoking user added to the `docker` group |
+| Worker CLI | opencode is installed if none of opencode, claude, codex, pi is present |
+| Strix | Docker running and an LLM key |
+| Cairn | `uv`, plus Docker and the compose v2 plugin for container mode, or local mode reusing a host worker CLI |
+| Hermes (optional) | only for the control plane |
 
----
+> Added to the `docker` group? Group membership only reaches **new** logins. Run
+> `newgrp docker`, or log out and back in, before anything Docker-based will work.
 
 ## Run it
 
 ```bash
-triad setup      # wizard: one provider for both layers, then starts the stack
+triad setup
 ```
 
-`triad setup` asks **one** question: which provider should Strix *and* the Cairn
-worker use. One key then covers both, so there is no second prompt and no way for
-the two layers to end up on different providers by accident. It writes `.env` (mode
-600, comments preserved), sets the worker's model in the dispatcher config, then
-offers to start the stack.
+One question: which provider should **Strix and the Cairn worker** share. A single key
+covers both, and it then shows that provider's **real model list** so no id is ever
+typed from memory.
 
-When the two sides should differ, use `triad configure`:
+If the two sides should differ (a cheap model on the high-volume worker, a strong one
+on Strix, or a worker on a subscription while Strix is billed):
 
 ```bash
-triad configure              # wizard: pick a model for each side separately
-triad configure --show       # report both sides, change nothing
-triad configure --strix-model openrouter/z-ai/glm-5.3
-triad configure --worker-provider deepseek
-triad configure --worker-model openrouter/z-ai/glm-5.3 --worker-key ...   # scriptable
+triad configure      # a model per side, preselected from what each is using
+triad models         # just look at what a provider serves
 ```
 
-That is the case for a cheap model on the high-volume worker and a stronger one on
-Strix, or a worker on a subscription while Strix uses a billed API. Both menus
-preselect whatever each side is currently using, so pressing Enter keeps it.
-
-The worker's model lives in the dispatcher config, not in `.env`, and `configure`
-writes it to `.triad/dispatch.local.yaml` (gitignored) with `dispatch.local.yaml`
-as the untouched template. `triad up` and `triad engage` prefer that generated file
-when it exists, so a chosen worker model never shows up as a local change in git
-and never conflicts on a pull.
-
-Bare `triad` does the same as `setup` on an unconfigured checkout, and otherwise
-reports where things stand. Each step is also available on its own:
-
 ```bash
-triad up         # start the Cairn server and the dispatcher
-triad down       # stop them (data is kept); --keep-server stops only the dispatcher
-triad status     # list projects, or one graph with --project
-triad auth       # (re)write the worker CLI's key from .env; --show to inspect
+triad up             # start the Cairn server and the dispatcher
+triad down           # stop them (data is kept); --keep-server stops the dispatcher only
+triad status         # list projects, or one graph with --project
+triad auth           # (re)write the worker CLI's key from .env; --show to inspect
 ```
 
-The worker CLI needs a key, and it does **not** need `opencode auth login`: `triad
-setup` puts `OPENCODE_GO_API_KEY` (or `OPENROUTER_API_KEY`) straight into
-opencode's own credentials file, `~/.local/share/opencode/auth.json`, as
-`{"<provider>": {"type": "api", "key": "..."}}` at mode 600. `triad auth` does the
-same on its own, merging rather than replacing anything already there.
+The worker CLI never needs `opencode auth login`: `setup` writes the key straight into
+opencode's own credentials file, `~/.local/share/opencode/auth.json`, mode 600,
+merging rather than replacing. If a chosen worker model ever shows as a git change,
+that is a bug: `configure` writes machine-specific settings to `.triad/` (gitignored)
+and leaves `dispatch.local.yaml` as the template.
 
-The server and the dispatcher are **separate processes**, and a project will not
-move until the dispatcher is running. `triad up` runs the dispatcher on the host,
-which is the path verified end to end here; `--container` uses the compose
-dispatcher instead, which needs the amd64-only worker image. Runtime pids and logs
-live in `.triad/`, so a dispatcher that refuses to start says why in its log.
-
-When `triad up` stops early it names the culprit and the fix: Docker installed but
-the daemon down, or Docker fine but your user not yet in the `docker` group, or no
-worker CLI, or uv missing. It then prints the last lines of the component log that
-failed. Install-time equivalent: `./install.sh --check` reports each layer.
-
-Drive it headlessly. This is the normal flow, and it needs no Hermes:
+### An engagement
 
 ```bash
-# One command for the whole flow: project -> Strix scan -> feed the graph.
 triad engage --title ACME --target https://app.example \
              --goal "conclude or rule out every finding in scope" \
              --roe contracts/roe-instructions.md
@@ -226,126 +153,93 @@ triad watch  --project proj_001
 triad report --project proj_001 --workdir ~/engagements/acme -o report.md
 ```
 
-`engage` runs the scan itself, waits for it to settle, and posts each finding as a
-hint plus an actionable finding as an intent. Add `--watch` to follow the graph
-straight after feeding, `--mode`/`--max-turns` to size the scan, `--scan-timeout`
-if a long scan needs longer than the default hour, and `--json` for a summary you
-can script against.
-
-Cairn does not work the graph while the scan is running. `engage` stops the
-dispatcher before it creates the project, and starts it again once the findings are
-in. Otherwise the dispatcher begins a bootstrap pass and claims intents the moment
-the project exists, on a graph holding none of Strix's input, which duplicates the
-scan and spends budget on the wrong work. `--no-pause` restores the overlap, and
-`--hold` leaves Cairn idle after the feed so you can look at the graph first.
-
-The steps stay available individually for when a scan is already running, was run
-elsewhere, or you want to re-feed after it finished (`--no-scan` on `engage` is the
-project-only path):
-
-```bash
-triad engage --no-scan --title ACME --target https://app.example --goal "..."
-triad scan   --target https://app.example --workdir ~/engagements/acme --mode quick
-triad findings --workdir ~/engagements/acme
-triad feed   --project proj_001 --workdir ~/engagements/acme
-```
-
-Re-feeding a run is safe: hints and intents are additive, so a scan that was still
-running when you fed it can be fed again once it finishes.
-
-Sequencing note: with the dispatcher stopped, nothing in Cairn advances, bootstrap
-included, because the dispatcher is the only component that acts on a project. The
-server by itself is inert and safe to leave up.
-
-If Hermes is installed, the plugin exposes this same package as `cairn_*` and
-`strix_*` tools, so a chat session drives exactly these calls. That path is
-convenience, not a dependency.
-
-Emergency stop for every project: `make stop-all`. With the Hermes gateway,
-`cairn_status(project_id, "stopped")` is one message away.
-
----
+- `engage` takes the dispatcher down for the duration of the scan and starts it once
+  the findings are in, so Cairn cannot bootstrap a graph holding none of Strix's
+  input. `--no-pause` allows the overlap; `--hold` leaves Cairn idle afterwards.
+- `--mode` and `--max-turns` size the scan, `--scan-timeout` extends the one-hour
+  default, `--json` prints a scriptable summary.
+- The steps work alone when a scan is already running, or was run elsewhere:
+  `triad scan`, `triad findings`, `triad feed`. Re-feeding is safe, because hints and
+  intents are additive.
+- **Scope the goal carefully.** It is the autonomy boundary: a goal one finding can
+  satisfy buys you one finding, and the rest of the work sits stranded. Scope it up
+  front ("conclude or rule out every module") rather than reopening later: `reopen`
+  records a correction but does not change the completion criterion, so a
+  literally-satisfied goal re-completes within one pass.
+- With the dispatcher stopped, nothing in Cairn advances (bootstrap included), so the
+  server is safe to leave up.
+- **Emergency stop for every project:** `make stop-all`. Through the Hermes gateway,
+  `cairn_status(project_id, "stopped")` is one message away.
 
 ## Layout
 
-```
+```text
 triad/
-├── install.sh                 the installer (idempotent, path-overridable)
-├── triad.py                   headless driver (engage/scan/feed/watch/report)
+├── assets/                    the banner above, plus the mark on its own (logo.svg)
+├── install.sh                 the installer, idempotent and path-overridable
+├── triad.py                   the driver: setup, configure, engage, watch, report
 ├── patches/                   the one change this repo makes to Cairn
 ├── docker-compose.yaml        Cairn server + dispatcher (+ optional egress proxy)
 ├── dispatch.yaml              worker pool, model routing, concurrency caps
-├── dispatch.local.yaml        no-Docker / arm64 fallback (uses the opencode backend)
+├── dispatch.local.yaml        no-Docker / arm64 fallback on the opencode backend
 ├── contracts/
 │   ├── finding.schema.json    the layer-to-layer handoff object
 │   └── roe-instructions.md    rules-of-engagement template
-├── plugin/                    the tool package: strix_* / cairn_* tools + the loop skill
-│   └── skills/triad-engagement/SKILL.md
-├── integrations/hermes/config-snippets.yaml  MCP + cron + gateway wiring (optional)
-└── mcp/cairn_mcp.py           Cairn as an MCP server (Strix *or* Hermes can use it)
+├── plugin/                    strix_* / cairn_* tools plus the engagement skill
+├── integrations/hermes/       MCP, cron and gateway wiring (inert without Hermes)
+└── mcp/cairn_mcp.py           Cairn as an MCP server, for Strix or for Hermes
 ```
 
-`plugin/` is a plain Python package: `triad.py` imports it directly, and Hermes
-loads the same directory as a plugin when it is installed. `integrations/` holds
-the Hermes-only wiring and is inert otherwise.
-
+`plugin/` is a plain Python package: `triad.py` imports it directly, and Hermes loads
+the same directory as a plugin when it is installed, exposing the same calls as
+`strix_*` and `cairn_*` tools so a chat session drives exactly what the CLI does.
 `cairn/` appears after install and is gitignored.
 
----
+## The opencode worker backend
 
-## The `opencode` worker backend (this repo's patch to Cairn)
+Upstream Cairn ships four worker backends (claudecode, codex, pi, mock). With none of
+those CLIs installed the exploitation layer cannot run at all, so this repo adds a
+fifth: `opencode`. Shipped as a patch
+(`patches/0001-opencode-worker-backend.patch`), never as a vendored Cairn. It registers
+the backend in `workers/adapters/__init__.py`, `workers/registry.py` and
+`WorkerType` / `WORKER_ENV_KEYS` in `dispatcher/config.py`, and parses opencode's
+`--format json` event stream for reply text and session id, so the conclude phase
+continues the same session.
 
-Upstream Cairn ships four worker backends: `claudecode`, `codex`, `pi`, `mock`.
-If none of those CLIs is installed, the exploitation layer cannot run at all.
-This repo adds a fifth: `opencode`.
-
-- `patches/0001-opencode-worker-backend.patch`: the driver plus its registration
-  in `workers/adapters/__init__.py`, `workers/registry.py`, and `WorkerType` /
-  `WORKER_ENV_KEYS` in `dispatcher/config.py`.
-- Parses opencode's `--format json` event stream for reply text and session id, so
-  the conclude phase continues the same session.
-- Worker env: `OPENCODE_MODEL`, `OPENCODE_AGENT`, `OPENCODE_AUTO` (default on),
-  plus `OPENCODE_BASE_URL` / `OPENCODE_API_KEY` / `OPENCODE_EXTRA_HEADERS` for the
-  health check. In local mode no keys are injected; it reuses the host config.
-- 9 tests; all 107 pass (98 upstream + 9 new). Verified end to end against a live
-  target: bash tool use, the exact `{"accepted": true, "data": {...}}` reply
-  contract, and cost telemetry.
-
----
+Its env keys are `OPENCODE_MODEL`, `OPENCODE_AGENT` and `OPENCODE_AUTO`, plus
+`OPENCODE_BASE_URL` / `OPENCODE_API_KEY` / `OPENCODE_EXTRA_HEADERS` for the health
+check. In local mode no keys are injected; it reuses the host config. Verified against
+a live target, including the exact `{"accepted": true, "data": {...}}` reply contract,
+bash tool use and cost telemetry. 9 new tests; all 107 pass.
 
 ## Known constraints
 
-- **The optional Hermes layer needs several GB.** Its installer unpacks Python, Node,
-  npm, ripgrep and FFmpeg into `$HERMES_HOME/tools` and clones the agent; a fresh
-  install lands around 7 GB. `install.sh` checks for 4 GB free under `$HOME` first
-  and refuses early with a clear reason rather than dying halfway through the
-  download. This is the main reason Hermes is opt-in: the Strix + Cairn flow needs
-  a fraction of that.
-- **The `goal` string is the autonomy boundary.** A goal one finding can satisfy buys
-  you one finding: the reason step completes the project and the remaining intents sit
-  stranded. Scope it up front ("conclude or rule out every module") rather than
-  reopening later: `reopen` records a correction but does not change the completion
-  criterion, so a literally-satisfied goal re-completes within one pass.
-- **Evidence is written to `/tmp/cairn-prompts/<phase>-<hash>/`**, not the engagement
-  workspace, and `/tmp` is volatile. Copy it into the engagement directory at close-out.
-- **Cairn's worker image is `linux/amd64` only.** On arm64 use `dispatch.local.yaml`
-  or add `platform: linux/amd64` (qemu emulation, slow). Strix's sandbox image is
-  multi-arch and runs natively on arm64.
-- **Cairn is AGPL-3.0.** Free for personal/educational use; commercial use needs a
-  commercial license from its author. See [LICENSE](LICENSE).
-- **`--max-budget` in Strix silently no-ops on models LiteLLM cannot price.** Use
-  `--max-turns`; the plugin sets it by default.
+- **The optional Hermes layer wants several GB.** Its installer unpacks Python, Node,
+  npm, ripgrep and FFmpeg and clones the agent; a fresh install lands near 7 GB.
+  `install.sh` checks for 4 GB free first and refuses early with a reason instead of
+  dying halfway. This is the main reason it is opt-in.
+- **Evidence lands in `/tmp/cairn-prompts/<phase>-<hash>/`**, not the engagement
+  workspace, and `/tmp` is volatile. Copy anything you need at close-out.
+- **Cairn's worker image is `linux/amd64` only.** On arm64 use `dispatch.local.yaml`,
+  or add `platform: linux/amd64` and accept emulation. Strix's sandbox image is
+  multi-arch and runs natively.
+- **`--max-budget` in Strix silently no-ops on models LiteLLM cannot price.** Bound a
+  run with `--max-turns`; the plugin sets it by default.
 - **A host reboot leaves `run.json` at `status: running`** even with complete
   artifacts. Judge a run by its artifacts, not that field.
-- **The dispatcher does not restart itself.** The compose server does
-  (`restart: unless-stopped`); `cairn dispatch` is a plain process.
-- **Cairn pins the Aliyun PyPI mirror.** If that is slow from your network, override
-  with `UV_DEFAULT_INDEX=https://pypi.org/simple` before building.
-
----
+- **The dispatcher does not restart itself.** The compose server does; `cairn
+  dispatch` is a plain process.
+- **Cairn pins the Aliyun PyPI mirror.** If it is slow from your network, build with
+  `UV_DEFAULT_INDEX=https://pypi.org/simple`.
 
 ## Authorization
 
-These are offensive tools. Point them only at systems you own, or that you hold
-explicit written permission to test, within the window that permission covers.
-Filling in `contracts/roe-instructions.md` before a run is not optional.
+These are offensive tools. Point them only at systems you own, or hold explicit
+written permission to test, within the window that permission covers. Filling in
+`contracts/roe-instructions.md` before a run is not optional.
+
+## License
+
+MIT, see [LICENSE](LICENSE). Cairn is cloned separately under its own **AGPL-3.0**,
+which is why it is never vendored here: free for personal and educational use, but
+commercial use needs a commercial licence from its author.
