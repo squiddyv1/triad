@@ -13,15 +13,22 @@ Start here:
     triad up               start the Cairn server and the dispatcher
     triad down             stop them (data is kept)
 
-Then run an engagement:
+Then run an engagement. `engage` is the whole default flow: it creates the project,
+runs the Strix scan, then feeds the findings into the graph as hints and intents.
 
-    python3 triad.py engage  --title ACME --target https://app.example --goal "admin access" \
-                             --roe contracts/roe-instructions.md
-    python3 triad.py scan    --target https://app.example --roe contracts/roe-instructions.md \
-                             --workdir ~/engagements/acme --mode quick --max-turns 50 --wait
-    python3 triad.py feed    --project proj_001 --workdir ~/engagements/acme
-    python3 triad.py watch   --project proj_001 --timeout 1800
-    python3 triad.py report  --project proj_001 --workdir ~/engagements/acme -o report.md
+    triad engage --title ACME --target https://app.example \
+                 --goal "conclude or rule out every finding in scope" \
+                 --roe contracts/roe-instructions.md
+    triad watch  --project proj_001
+    triad report --project proj_001 --workdir ~/engagements/acme -o report.md
+
+The steps are also usable on their own, which is what --no-scan and the individual
+commands are for when a scan is already running or was run elsewhere:
+
+    triad engage --no-scan ...                       # project only
+    triad scan   --target ... --workdir ...          # Strix only
+    triad findings --workdir ...                     # read a run
+    triad feed   --project proj_001 --workdir ...    # feed an existing run
 
 `triad up` runs the dispatcher as a host process, which is the path verified end
 to end here; the containerised dispatcher needs the amd64-only worker image, so
@@ -35,6 +42,7 @@ import importlib.util
 import json
 import os
 import platform
+import re
 import shutil
 import signal
 import subprocess
@@ -108,9 +116,63 @@ def _read_roe(path, *, max_chars=1800):
 
 
 
+def _slug(text, fallback="engagement"):
+    """A filesystem-safe name for an engagement directory."""
+    cleaned = re.sub(r"[^a-z0-9]+", "-", (text or "").lower()).strip("-")
+    return cleaned[:48] or fallback
+
+
+def _engage_workdir(args):
+    """Where this engagement's Strix run and artifacts live.
+
+    Defaults under TRIAD_WORKDIR (set by the installed wrapper and by .env) so the
+    layout matches what the docs and the plugin already assume.
+    """
+    if getattr(args, "workdir", None):
+        return Path(args.workdir).expanduser().resolve()
+    base = (os.environ.get("TRIAD_WORKDIR") or _env_read().get("TRIAD_WORKDIR")
+            or "~/engagements")
+    return (Path(base).expanduser() / _slug(getattr(args, "title", ""))).resolve()
+
+
+def _strix_available():
+    if shutil.which("strix"):
+        return True
+    return (Path.home() / ".strix" / "bin" / "strix").exists()
+
+
+def _feed_run(c, project, workdir, run_id=None, anchor="origin"):
+    """Post one Strix run into the graph.
+
+    A hint per finding, an intent per actionable finding, all anchored on the
+    origin fact. This is the handoff the whole tool exists for: without it the
+    graph has nothing to search and the scan is just JSON on disk.
+    """
+    run = strix.read_run(Path(workdir).expanduser(), run_id)
+    hints, intents = strix.to_cairn_leads(run)
+    posted_hints, posted_intents = [], []
+    for h in hints:
+        posted_hints.append(c.add_hint(project, f"[strix] {h}", "hermes.strix").get("id"))
+    for d in intents:
+        posted_intents.append(c.add_intent(project, [anchor], d, "hermes.strix").get("id"))
+    return run, posted_hints, posted_intents
+
+
 def cmd_engage(args):
+    """The default flow: create the project, run Strix, hand the findings to Cairn.
+
+    All three in one command is the point. A Strix run on its own is JSON nobody
+    reads, and a Cairn project with no input has nothing to search, so the handoff
+    between them is the part that matters. `--no-scan` stops after the project.
+    """
+    if not _cairn_up():
+        _err(f"Cairn is not answering at {_base_url()}")
+        print("     start the stack first:  triad up")
+        return 2
+
+    c = client()
     hints = _read_roe(args.roe) or []
-    res = client().create_project(
+    res = c.create_project(
         title=args.title,
         origin=f"target {args.target}",
         goal=args.goal,
@@ -122,8 +184,63 @@ def cmd_engage(args):
     print(f"  origin: {args.target}")
     print(f"  goal:   {args.goal}")
     print(f"  hints:  {len(hints)} from {args.roe or '(none)'}")
+
+    summary = {"project": pid, "target": args.target, "goal": args.goal,
+               "workdir": None, "findings": 0, "coverage_gaps": 0,
+               "hints_posted": 0, "intents_posted": 0}
+
+    if getattr(args, "no_scan", False):
+        print("\n--no-scan: stopping after the project; the graph has no input yet")
+        print(f"  next:  triad scan --target {args.target} --workdir <dir>")
+        print(f"         triad feed --project {pid} --workdir <dir>")
+        if args.json:
+            print(json.dumps(summary))
+        return 0
+
+    if not _strix_available():
+        _err("strix is not installed, so nothing can be fed into the graph")
+        print("     ./install.sh installs it; the project above still exists")
+        return 2
+
+    workdir = _engage_workdir(args)
+    summary["workdir"] = str(workdir)
+    print(f"\n1/2 strix {args.mode} scan (max {args.max_turns} turns) -> {workdir}")
+    launch = strix.run_scan(args.target, workdir, instruction_file=args.roe,
+                            scan_mode=args.mode, max_turns=args.max_turns)
+    print(f"    pid {launch['pid']}; log {launch['log']}")
+    print(f"    waiting up to {args.scan_timeout}s for the run to settle")
+    run_dir = _wait_for_run(workdir, timeout=args.scan_timeout)
+    if run_dir is None:
+        _err("no Strix run directory appeared, so there is nothing to feed")
+        print(f"     check {launch['log']}, then:  triad feed --project {pid} --workdir {workdir}")
+        return 1
+
+    print(f"    run: {run_dir.name}")
+    print(f"\n2/2 feeding it into {pid}")
+    run, posted_hints, posted_intents = _feed_run(c, pid, workdir, None, args.anchor)
+    summary.update({"findings": len(run["findings"]),
+                    "coverage_gaps": len(run["coverage_gaps"]),
+                    "hints_posted": len(posted_hints),
+                    "intents_posted": len(posted_intents)})
+    print(f"    findings {len(run['findings'])}  coverage gaps {len(run['coverage_gaps'])}")
+    print(f"    hints {len(posted_hints)}  intents {len(posted_intents)}")
+    if not run["findings"]:
+        _warn("the scan found nothing, so the graph gained only coverage gaps")
+    if run.get("status") in ("running", "in_progress", None):
+        _warn("that run had not finished; feeding it again later is safe (hints and")
+        _warn("intents are additive, so re-run: triad feed --project ... --workdir ...)")
+
+    if _pid_alive(DISPATCH_PID) is None:
+        _warn("the dispatcher is not running, so the graph will not move")
+        print("     start it:  triad up")
+
+    print("\nnext:")
+    print(f"  triad watch  --project {pid}                 # follow the graph")
+    print(f"  triad report --project {pid} --workdir {workdir} -o report.md")
     if args.json:
-        print(json.dumps(res))
+        print(json.dumps(summary))
+    if getattr(args, "watch", False):
+        return _watch_until(pid, args.watch_timeout, args.interval)
     return 0
 
 
@@ -179,28 +296,22 @@ def cmd_findings(args):
 
 
 def cmd_feed(args):
-    c = client()
-    run = strix.read_run(Path(args.workdir).expanduser(), args.run)
-    hints, intents = strix.to_cairn_leads(run)
-    posted = {"hints": [], "intents": []}
-    for h in hints:
-        posted["hints"].append(c.add_hint(args.project, f"[strix] {h}", "hermes.strix").get("id"))
-    for d in intents:
-        posted["intents"].append(
-            c.add_intent(args.project, [args.anchor], d, "hermes.strix").get("id"))
+    run, posted_hints, posted_intents = _feed_run(
+        client(), args.project, args.workdir, args.run, args.anchor)
     print(f"fed run {run['run']} -> {args.project}")
     print(f"  findings: {len(run['findings'])}  gaps: {len(run['coverage_gaps'])}")
-    print(f"  hints posted:   {posted['hints']}")
-    print(f"  intents posted: {posted['intents']}")
+    print(f"  hints posted:   {posted_hints}")
+    print(f"  intents posted: {posted_intents}")
     return 0
 
 
-def cmd_watch(args):
+def _watch_until(project, timeout, interval):
+    """Poll the graph until it completes, is stopped, or the timeout runs out."""
     c = client()
-    deadline = time.time() + args.timeout
+    deadline = time.time() + timeout
     last_sig = None
     while time.time() < deadline:
-        g = c.get_project(args.project)
+        g = c.get_project(project)
         p, facts, intents = g["project"], g.get("facts", []), g.get("intents", [])
         open_i = [i for i in intents if not i.get("to")]
         sig = (p["status"], len(facts), len(open_i))
@@ -214,9 +325,13 @@ def cmd_watch(args):
         if p["status"] == "stopped":
             print("project was stopped.")
             return 2
-        time.sleep(args.interval)
-    print(f"timed out after {args.timeout}s; last state: {last_sig}")
+        time.sleep(interval)
+    print(f"timed out after {timeout}s; last state: {last_sig}")
     return 1
+
+
+def cmd_watch(args):
+    return _watch_until(args.project, args.timeout, args.interval)
 
 
 def cmd_status(args):
@@ -1146,11 +1261,22 @@ def main(argv=None):
     au.add_argument("--show", action="store_true", help="report what is configured, write nothing")
     au.set_defaults(func=cmd_auth)
 
-    e = sub.add_parser("engage", help="create a Cairn project for a target")
+    e = sub.add_parser("engage", help="run the default flow: project, Strix scan, feed the graph")
     e.add_argument("--title", required=True)
     e.add_argument("--target", required=True)
     e.add_argument("--goal", required=True)
     e.add_argument("--roe")
+    e.add_argument("--workdir", help="where the Strix run goes (default: $TRIAD_WORKDIR/<title>)")
+    e.add_argument("--mode", default="quick", choices=["quick", "standard", "deep"])
+    e.add_argument("--max-turns", type=int, default=60)
+    e.add_argument("--scan-timeout", type=int, default=3600,
+                   help="how long to wait for the scan to settle (default 3600s)")
+    e.add_argument("--anchor", default="origin", help="graph fact the findings hang off")
+    e.add_argument("--no-scan", action="store_true",
+                   help="only create the project; do not scan or feed")
+    e.add_argument("--watch", action="store_true", help="follow the graph once fed")
+    e.add_argument("--watch-timeout", type=int, default=1800)
+    e.add_argument("--interval", type=int, default=15)
     e.add_argument("--no-bootstrap", action="store_true")
     e.add_argument("--json", action="store_true")
     e.set_defaults(func=cmd_engage)

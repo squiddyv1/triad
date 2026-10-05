@@ -33,9 +33,11 @@ command-line tool. Hermes is an optional third layer, never a requirement.
   approvals, audit trail, plus skills and memory so an engagement improves between
   runs. Installed only with `--with-hermes`; everything else works without it.
 
-The normal flow is `triad.py engage` -> Strix scan -> `triad.py feed` -> Cairn
-dispatcher -> `triad.py report`. Reasoning, verified API notes, failure modes and
-the build plan: **[ARCHITECTURE.md](ARCHITECTURE.md)**.
+The normal flow is one command: `triad engage` creates the Cairn project, runs the
+Strix scan, and feeds the findings into the graph as hints and intents. Cairn's
+dispatcher then works those leads, and `triad report` writes it up. Reasoning,
+verified API notes, failure modes and the build plan:
+**[ARCHITECTURE.md](ARCHITECTURE.md)**.
 ---
 
 ## Install
@@ -193,15 +195,33 @@ failed. Install-time equivalent: `./install.sh --check` reports each layer.
 Drive it headlessly. This is the normal flow, and it needs no Hermes:
 
 ```bash
+# One command for the whole flow: project -> Strix scan -> feed the graph.
 triad engage --title ACME --target https://app.example \
              --goal "conclude or rule out every finding in scope" \
              --roe contracts/roe-instructions.md
-triad scan   --target https://app.example --workdir ~/engagements/acme \
-             --roe contracts/roe-instructions.md --mode quick --max-turns 50
-triad feed   --project proj_001 --workdir ~/engagements/acme
-triad watch  --project proj_001 --timeout 1800
+triad watch  --project proj_001
 triad report --project proj_001 --workdir ~/engagements/acme -o report.md
 ```
+
+`engage` runs the scan itself, waits for it to settle, and posts each finding as a
+hint plus an actionable finding as an intent. Add `--watch` to follow the graph
+straight after feeding, `--mode`/`--max-turns` to size the scan, `--scan-timeout`
+if a long scan needs longer than the default hour, and `--json` for a summary you
+can script against.
+
+The steps stay available individually for when a scan is already running, was run
+elsewhere, or you want to re-feed after it finished (`--no-scan` on `engage` is the
+project-only path):
+
+```bash
+triad engage --no-scan --title ACME --target https://app.example --goal "..."
+triad scan   --target https://app.example --workdir ~/engagements/acme --mode quick
+triad findings --workdir ~/engagements/acme
+triad feed   --project proj_001 --workdir ~/engagements/acme
+```
+
+Re-feeding a run is safe: hints and intents are additive, so a scan that was still
+running when you fed it can be fed again once it finishes.
 
 If Hermes is installed, the plugin exposes this same package as `cairn_*` and
 `strix_*` tools, so a chat session drives exactly these calls. That path is
