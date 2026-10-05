@@ -47,7 +47,6 @@ class Cairn:
         self.base = base_url.rstrip("/")
         self.timeout = timeout
 
-    # ---- transport ----------------------------------------------------
     def _call(self, method: str, path: str, body: dict | None = None):
         data = json.dumps(body).encode() if body is not None else None
         req = urllib.request.Request(
@@ -76,7 +75,6 @@ class Cairn:
         except urllib.error.HTTPError as e:
             raise CairnError(f"GET {path} -> HTTP {e.code}") from None
 
-    # ---- projects -----------------------------------------------------
     def health(self) -> list:
         return self._call("GET", "/projects")
 
@@ -108,7 +106,6 @@ class Cairn:
     def delete_project(self, project_id):
         return self._call("DELETE", f"/projects/{project_id}")
 
-    # ---- graph --------------------------------------------------------
     def add_hint(self, project_id, content, creator="hermes") -> dict:
         return self._call("POST", f"/projects/{project_id}/hints",
                           {"content": content, "creator": creator})
@@ -149,7 +146,6 @@ class Cairn:
         return self._call("POST", f"/projects/{project_id}/reopen",
                           {"description": description, "creator": creator})
 
-    # ---- derived helpers ---------------------------------------------
     @staticmethod
     def goal_path(graph: dict) -> list:
         """Walk the completed graph backwards from `goal` and return the ordered

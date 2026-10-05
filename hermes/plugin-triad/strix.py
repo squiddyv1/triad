@@ -114,10 +114,8 @@ def read_run(cwd, run_name=None) -> dict:
         except (json.JSONDecodeError, OSError):
             pass
 
-    # SARIF always carries the coverage gaps (they exist nowhere else). Its
-    # results are also a fallback finding source, used only when
-    # vulnerabilities.json is missing -- otherwise the same finding is
-    # counted twice.
+    # Only SARIF carries the coverage gaps. Its results are a fallback finding
+    # source used when vulnerabilities.json is missing, or the same finding counts twice.
     sarif = run_dir / "findings.sarif"
     if sarif.is_file():
         try:

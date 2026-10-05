@@ -12,7 +12,7 @@ metadata:
 
 Discovery scans the target. Cairn searches the exploitation state space.
 Hermes is the control plane: it decides, gates, records and reports. Never let
-one layer do another layer's job — that separation is the whole point.
+one layer do another layer's job; that separation is the whole point.
 
 ## Before anything
 
@@ -28,12 +28,12 @@ one layer do another layer's job — that separation is the whole point.
    Keep `bootstrap=false` when you want Strix to lead discovery first.
 2. **Discover.** `strix_scan(target, instruction_file=<roe>, scan_mode="quick"|"deep",
    max_turns=N, workdir=<engagement dir>)`. Non-blocking; a scan is tens of minutes.
-   Always set `max_turns` — `--max-budget` does not trip on unpriced models.
+   Always set `max_turns`; `--max-budget` does not trip on unpriced models.
 3. **Read honestly.** `strix_findings(workdir)`. `findings` are validated vulns;
    `coverage_gaps` are *unexamined*, never "no issues found". Report both.
 4. **Hand off.** `triad_feed(project_id, workdir)` posts findings as hints and
    exploitation intents onto the Cairn graph.
-5. **Let Cairn work.** Poll `cairn_graph(project_id)` — new facts, open intents,
+5. **Let Cairn work.** Poll `cairn_graph(project_id)` for new facts, open intents,
    dead ends. Add `cairn_hint` when you have context the workers lack
    (new credentials, a dead end, a scanner lead). Do not micromanage.
 6. **Validate before you claim success.** A Cairn `completed` status is a claim,

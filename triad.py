@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""triad — command-line driver for the Strix + Cairn + Hermes stack.
+"""triad: command-line driver for the Strix + Cairn + Hermes stack.
 
 Composes the same operations the Hermes plugin exposes as tools, so the whole
 engagement loop can run headless (CI, cron, a dry run) as well as from a Hermes
@@ -94,7 +94,6 @@ def _read_roe(path, *, max_chars=1800):
     return [f"[ROE] {text}"]
 
 
-# ---------------------------------------------------------------- commands
 
 def cmd_engage(args):
     hints = _read_roe(args.roe) or []
@@ -124,7 +123,7 @@ def cmd_scan(args):
     print(f"strix started pid={res['pid']} in {res['cwd']}")
     print(f"  cmd: {' '.join(res['cmd'])}")
     if not args.wait:
-        print("  (not waiting — poll with: triad.py findings --workdir ...)")
+        print("  (not waiting; poll with: triad.py findings --workdir ...)")
         return 0
     print("  waiting for the run directory to appear and settle...")
     run_dir = _wait_for_run(workdir, timeout=args.wait_timeout)
@@ -203,7 +202,7 @@ def cmd_watch(args):
             print("project was stopped.")
             return 2
         time.sleep(args.interval)
-    print(f"timed out after {args.timeout}s — last state: {last_sig}")
+    print(f"timed out after {args.timeout}s; last state: {last_sig}")
     return 1
 
 
@@ -228,7 +227,7 @@ def cmd_report(args):
     c = client()
     g = c.get_project(args.project)
     p = g["project"]
-    out = [f"# Pentest report — {p['title']}", "",
+    out = [f"# Pentest report: {p['title']}", "",
            f"- Status: **{p['status']}**", f"- Project: `{p['id']}`",
            f"- Started: {p.get('created_at')}", ""]
 
@@ -241,7 +240,7 @@ def cmd_report(args):
         out += ["## Attack path", ""]
         for step in path:
             via = step["via"] or "(starting point)"
-            out += [f"1. **{step['fact']}** — {step['description']}",
+            out += [f"1. **{step['fact']}**: {step['description']}",
                     f"   - via: {via}  (worker: {step['worker'] or 'n/a'})"]
         out.append("")
     else:
@@ -279,7 +278,6 @@ def cmd_report(args):
     return 0
 
 
-# ---------------------------------------------------------------- cli
 
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="triad", description=__doc__.splitlines()[0])

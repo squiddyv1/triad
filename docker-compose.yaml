@@ -1,4 +1,4 @@
-# Triad stack — Cairn server + dispatcher, with the Hermes control plane running
+# Triad stack: Cairn server + dispatcher, with the Hermes control plane running
 # on the host (Hermes needs to be where its CLIs, gateway and skills live).
 #
 #   cp .env.example .env && make up
@@ -48,7 +48,7 @@ services:
     restart: unless-stopped
     command: ["uv", "run", "cairn", "dispatch", "--config", "dispatch.yaml"]
 
-  # --- optional: scope-enforcing egress proxy -----------------------------
+  # Optional scope-enforcing egress proxy.
   # cairn-egress:
   #   image: mitmproxy/mitmproxy:latest
   #   container_name: triad-cairn-egress

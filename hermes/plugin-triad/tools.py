@@ -26,8 +26,6 @@ def _err(msg) -> str:
     return json.dumps({"ok": False, "error": str(msg)})
 
 
-# ---- Cairn ---------------------------------------------------------------
-
 def cairn_list(args: dict, **kwargs) -> str:
     try:
         return _ok(projects=_client().list_projects())
@@ -101,8 +99,6 @@ def cairn_status(args: dict, **kwargs) -> str:
     except Exception as e:
         return _err(e)
 
-
-# ---- Strix ---------------------------------------------------------------
 
 def strix_scan(args: dict, **kwargs) -> str:
     try:

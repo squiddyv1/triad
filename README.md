@@ -1,11 +1,11 @@
-# Triad — one deployable system over Strix + Cairn + Hermes
+# Triad: one deployable system over Strix + Cairn + Hermes
 
 Discovery, exploitation and orchestration as three layers with clean handoffs,
 run by a single agent control plane.
 
 ```
         ┌───────────────────────────────────────────────────────────┐
-        │  HERMES  — control plane (orchestration, memory, skills,   │
+        │  HERMES  : control plane (orchestration, memory, skills,   │
         │           cron, approvals, audit, kill switch)             │
         └───────────┬──────────────────────────────┬────────────────┘
         tools: strix_*                         tools: cairn_*
@@ -19,12 +19,12 @@ run by a single agent control plane.
              read authority                  write authority
 ```
 
-- **Strix** — autonomous pentest agent, Docker sandbox, validated findings.
+- **Strix**: autonomous pentest agent, Docker sandbox, validated findings.
   Produces `strix_runs/<run>/{vulnerabilities.json, findings.sarif, run.json}`.
-- **Cairn** ([oritera/Cairn](https://github.com/oritera/Cairn)) — blackboard
+- **Cairn** ([oritera/Cairn](https://github.com/oritera/Cairn)): blackboard
   Fact/Intent state-space search engine with a REST API. Give it `origin` + `goal`
   and its workers explore toward the goal. This is the layer that touches the target.
-- **Hermes** — the control plane: the loop, the policy, the budget, the approvals,
+- **Hermes** owns the control plane: the loop, the policy, the budget, the approvals,
   the audit trail, plus skills and memory so an engagement improves every run.
 
 Reasoning, verified API notes, failure modes and the build plan:
@@ -40,7 +40,7 @@ cd triad
 ./install.sh
 ```
 
-`install.sh` is idempotent and installs **all three layers** — whatever is already
+`install.sh` is idempotent and installs **all three layers**: whatever is already
 present is left alone, whatever is missing is installed:
 
 | Layer | Default behaviour |
@@ -59,7 +59,7 @@ Hermes  curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash -> ~/
 ```
 
 The only deviation is that the script is fetched to a temp file and its size and
-sha256 are printed before it runs — a reported one-liner instead of a blind pipe.
+sha256 are printed before it runs, a reported one-liner instead of a blind pipe.
 Same bytes, same installer.
 
 What it does, in order:
@@ -80,7 +80,7 @@ What it does, in order:
 ./install.sh --uninstall     # remove the symlinks it created (leaves Strix/Hermes alone)
 ```
 
-Docker and `uv` are checked but never installed — both have their own installers
+Docker and `uv` are checked but never installed; both have their own installers
 and installing them silently is not this script's call.
 
 ### Install method
@@ -178,14 +178,14 @@ Upstream Cairn ships four worker backends: `claudecode`, `codex`, `pi`, `mock`.
 If none of those CLIs is installed, the exploitation layer cannot run at all.
 This repo adds a fifth: `opencode`.
 
-- `patches/0001-opencode-worker-backend.patch` — the driver plus its registration
+- `patches/0001-opencode-worker-backend.patch`: the driver plus its registration
   in `workers/adapters/__init__.py`, `workers/registry.py`, and `WorkerType` /
   `WORKER_ENV_KEYS` in `dispatcher/config.py`.
 - Parses opencode's `--format json` event stream for reply text and session id, so
   the conclude phase continues the same session.
 - Worker env: `OPENCODE_MODEL`, `OPENCODE_AGENT`, `OPENCODE_AUTO` (default on),
   plus `OPENCODE_BASE_URL` / `OPENCODE_API_KEY` / `OPENCODE_EXTRA_HEADERS` for the
-  health check. In local mode no keys are injected — it reuses the host config.
+  health check. In local mode no keys are injected; it reuses the host config.
 - 9 tests; all 107 pass (98 upstream + 9 new). Verified end to end against a live
   target: bash tool use, the exact `{"accepted": true, "data": {...}}` reply
   contract, and cost telemetry.
@@ -195,13 +195,13 @@ This repo adds a fifth: `opencode`.
 ## Known constraints
 
 - **Hermes needs several GB.** Its installer unpacks Python, Node, npm, ripgrep and
-  FFmpeg into `$HERMES_HOME/tools` and clones the agent — a fresh install lands
+  FFmpeg into `$HERMES_HOME/tools` and clones the agent; a fresh install lands
   around 7 GB. `install.sh` checks for 4 GB free under `$HOME` first and refuses
   early with a clear reason rather than dying halfway through the download.
 - **The `goal` string is the autonomy boundary.** A goal one finding can satisfy buys
   you one finding: the reason step completes the project and the remaining intents sit
   stranded. Scope it up front ("conclude or rule out every module") rather than
-  reopening later — `reopen` records a correction but does not change the completion
+  reopening later: `reopen` records a correction but does not change the completion
   criterion, so a literally-satisfied goal re-completes within one pass.
 - **Evidence is written to `/tmp/cairn-prompts/<phase>-<hash>/`**, not the engagement
   workspace, and `/tmp` is volatile. Copy it into the engagement directory at close-out.

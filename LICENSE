@@ -27,14 +27,14 @@ SOFTWARE.
 This repository contains no third-party code. It *drives* three external projects,
 each under its own license, and `install.sh` clones one of them for you:
 
-- **Cairn** — https://github.com/oritera/Cairn — **AGPL-3.0**.
+- **Cairn**: https://github.com/oritera/Cairn, **AGPL-3.0**.
   Free for personal and educational use. Commercial or proprietary use requires a
   commercial license from its author. `patches/0001-opencode-worker-backend.patch`
   is a modification to Cairn and is therefore distributed under the same terms as
   the file it patches. If you redistribute a patched Cairn, the AGPL applies to it.
-- **Strix** — https://github.com/usestrix/strix — **Apache-2.0**. Installed
+- **Strix**: https://github.com/usestrix/strix, **Apache-2.0**. Installed
   separately; not bundled here.
-- **Hermes Agent** — https://github.com/NousResearch/hermes-agent — see its
+- **Hermes Agent**: https://github.com/NousResearch/hermes-agent. See its
   repository for licensing. Loads the plugin in `hermes/plugin-triad/`, which is
   MIT as above.
 

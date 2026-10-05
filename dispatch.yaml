@@ -44,7 +44,7 @@ container:
   #   - "NET_RAW"
 
 workers:
-  # --- decision points: stronger model ------------------------------------
+  # Decision points: use the stronger model.
   - name: "claude-reason-strong"
     type: "claudecode"
     task_types: [bootstrap, reason]
@@ -55,7 +55,7 @@ workers:
       ANTHROPIC_BASE_URL: "https://api.deepseek.com/anthropic"
       ANTHROPIC_AUTH_TOKEN: "REPLACE_ME"
 
-  # --- high-volume exploration: cheap model -------------------------------
+  # High-volume exploration: use the cheap model.
   - name: "claude-explore-cheap"
     type: "claudecode"
     task_types: [explore]
@@ -66,7 +66,7 @@ workers:
       ANTHROPIC_BASE_URL: "https://api.deepseek.com/anthropic"
       ANTHROPIC_AUTH_TOKEN: "REPLACE_ME"
 
-  # --- alternative backends (uncomment as needed) -------------------------
+  # Alternative backends, uncomment as needed.
   # - name: "codex-explore"
   #   type: "codex"
   #   task_types: [explore]

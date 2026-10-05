@@ -29,7 +29,7 @@ plugin: ## Symlink the triad plugin into the active Hermes profile
 	@ln -sfn $(PWD)/hermes/plugin-triad $(HERMES_PLUGINS)/triad
 	@hermes plugins doctor $(PWD)/hermes/plugin-triad || true
 
-stop-all: ## KILL SWITCH — hard-stop every Cairn project
+stop-all: ## KILL SWITCH: hard-stop every Cairn project
 	@for id in $$(curl -s http://127.0.0.1:8000/projects | python3 -c 'import json,sys;print(" ".join(p["id"] for p in json.load(sys.stdin)))'); do \
 	  echo -n "stopping $$id ... "; \
 	  curl -s -X PUT http://127.0.0.1:8000/projects/$$id/status \

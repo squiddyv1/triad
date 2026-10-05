@@ -1,7 +1,7 @@
-# Rules of engagement — <CLIENT> / <ENGAGEMENT ID>
+# Rules of engagement: <CLIENT> / <ENGAGEMENT ID>
 
 Fill this in before any scan. It is passed to Strix via `--instruction-file` and
-pasted into the Cairn project as hints. Keep it short, explicit and negative —
+pasted into the Cairn project as hints. Keep it short, explicit and negative:
 what is *out* of scope matters more than what is in.
 
 ## Authorization
@@ -12,12 +12,12 @@ what is *out* of scope matters more than what is in.
 
 ## In scope
 
-- <hostname / URL / IP range> — <what kind of testing is permitted>
+- <hostname / URL / IP range>: <what kind of testing is permitted>
 
 ## Out of scope (never touch, not even to "check")
 
 - Every other host, subdomain and IP range
-- The CDN / WAF itself — navigate it, never attack it
+- The CDN / WAF itself: navigate it, never attack it
 - Third-party SaaS, auth providers, payment processors
 - DoS / load testing of any kind
 

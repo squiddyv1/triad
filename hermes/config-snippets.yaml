@@ -1,6 +1,6 @@
-# Hermes wiring — paste the relevant blocks into ~/.hermes/config.yaml
+# Hermes wiring: paste the relevant blocks into ~/.hermes/config.yaml
 # (or let `hermes` write them: `hermes mcp add ...`). Restart Hermes after adding
-# MCP servers — connections are discovered at startup, there is no hot reload.
+# MCP servers: connections are discovered at startup, there is no hot reload.
 
 # 1) Cairn as an MCP server, so its graph ops are first-class Hermes tools.
 mcp_servers:

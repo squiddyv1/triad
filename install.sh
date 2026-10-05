@@ -1,36 +1,14 @@
 #!/usr/bin/env bash
 #
-# Triad installer — Strix (discovery) + Cairn (exploitation) + Hermes (control plane).
+# Triad installer: Strix (discovery) + Cairn (exploitation) + Hermes (control plane).
 #
 #   ./install.sh                 install everything (all three layers)
 #   ./install.sh --detect-only   report what is present, install nothing
 #   ./install.sh --check         verify an existing install, change nothing
 #   ./install.sh --uninstall     remove the symlinks this script created
 #
-# By default this installs whatever is missing. Strix and Hermes use the exact
-# commands their own repositories document, so this matches the official route:
-#   Strix   curl -sSL https://strix.ai/install | bash
-#   Hermes  curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
-# The scripts are downloaded to a temp file and hashed before they run (a
-# reported one-liner rather than a blind pipe) but it is the same installer.
-#
-# `--with-strix` / `--with-hermes` / `--all` are accepted for backwards
-# compatibility and are now no-ops, because installing is the default.
-#
-# Everything is configurable through environment variables:
-#   TRIAD_HOME    where the harness lives        (default: this script's directory)
-#   CAIRN_DIR     where Cairn is cloned          (default: $TRIAD_HOME/cairn)
-#   HERMES_HOME   the Hermes profile to extend   (default: $HERMES_HOME or ~/.hermes)
-#   BIN_DIR       where the `triad` CLI goes     (default: ~/.local/bin)
-#   ENGAGEMENTS   where engagements/runs live    (default: ~/engagements)
-#   TRIAD_INSTALL_METHOD  official|pkg|none      (default: official)
-#                         official = the vendor script above
-#                         pkg      = uv tool install / pipx, then fall back
-#                         none     = detect only, never install
-#   STRIX_INSTALL_METHOD / HERMES_INSTALL_METHOD   override per layer
-#
-# Nothing here is machine-specific: every path is derived or overridable, and the
-# script is idempotent — run it again to repair an install.
+# Env vars, install methods and the layer table are in README.md.
+# Every path is overridable, so nothing here is machine-specific.
 
 set -euo pipefail
 
@@ -60,7 +38,7 @@ for arg in "$@"; do
                     INSTALL_METHOD="none" ;;
     --with-strix|--with-hermes|--all)
                     : ;;   # now the default; accepted for compatibility
-    -h|--help)      sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help)      sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *)              echo "unknown option: $arg (try --help)" >&2; exit 2 ;;
   esac
 done
@@ -70,22 +48,8 @@ warn() { printf '  \033[33m!\033[0m %s\n' "$*"; }
 err()  { printf '  \033[31m✗\033[0m %s\n' "$*" >&2; }
 hdr()  { printf '\n\033[1m%s\033[0m\n' "$*"; }
 have() { command -v "$1" >/dev/null 2>&1; }
-
-# --------------------------------------------------------------------------- #
-# helpers: install a missing layer
-# --------------------------------------------------------------------------- #
-# Default method is `official`: run the installer each project documents on its
-# own repo page, so this path stays identical to the vendor's supported route.
-#   Strix   curl -sSL https://strix.ai/install | bash        -> ~/.strix/bin/strix
-#   Hermes  curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
-#
-# The only deviation is that the script is fetched to a temp file, sized and
-# hashed, then executed — a reported one-liner instead of a blind pipe. Same
-# bytes, same installer, one line of evidence in the transcript.
-#
-# `pkg` uses the package manager instead (uv tool, else pipx). Note PyPI can lag
-# the vendor channel for Hermes (0.19.0 vs 0.21.x), which is why `official` is
-# the default. `none` skips installation entirely.
+# Default is `official`: each project's own installer, fetched to a temp file and
+# hashed rather than piped blindly. See README.md for the URLs and `pkg`.
 
 # The vendor installers drop launchers in places this shell may not have on PATH
 # yet (they tell you to `source ~/.bashrc`). Pick them up immediately.
@@ -138,7 +102,7 @@ install_layer() {
     pkg)
       echo "  installing $label from a package manager (PyPI: $pkg)"
       if ! pkg_install "$pkg"; then
-        warn "no package manager, or it failed — falling back to the vendor script"
+        warn "no package manager, or it failed; falling back to the vendor script"
         script_install "$url" || { err "$label install failed"; return 1; }
       fi
       ;;
@@ -169,8 +133,7 @@ ensure_strix() {
 ensure_hermes() {
   if have hermes || [ -x "$HOME/.local/bin/hermes" ]; then ok "hermes already installed"; return 0; fi
   # The vendor installer unpacks Python, Node, npm, ripgrep and FFmpeg into
-  # $HERMES_HOME/tools and clones the agent — several GB. Check first so a run
-  # fails fast with a clear reason instead of halfway through a multi-GB download.
+  # $HERMES_HOME/tools: several GB, so check first and fail fast instead.
   local need_mb=4096 avail_mb
   avail_mb="$(df -Pm "$HOME" 2>/dev/null | awk 'NR==2{print $4}')"
   if [ -n "${avail_mb:-}" ] && [ "$avail_mb" -lt "$need_mb" ]; then
@@ -186,22 +149,16 @@ ensure_hermes() {
   fi
   return "$rc"   # must not be clobbered by the warn above
 }
-
-# --------------------------------------------------------------------------- #
-# uninstall
-# --------------------------------------------------------------------------- #
+# Uninstall.
 if [ "$MODE" = "uninstall" ]; then
   hdr "Uninstalling"
   [ -L "$PLUGIN_DST" ] && rm -f "$PLUGIN_DST" && ok "removed plugin symlink $PLUGIN_DST"
   [ -f "$BIN_DIR/triad" ] && rm -f "$BIN_DIR/triad" && ok "removed $BIN_DIR/triad"
   warn "kept: $CAIRN_DIR, $TRIAD_HOME/.env, $ENGAGEMENTS (delete manually if you want them gone)"
-  warn "Strix and Hermes are separate installs — this does not touch them"
+  warn "Strix and Hermes are separate installs; this does not touch them"
   exit 0
 fi
-
-# --------------------------------------------------------------------------- #
-# prerequisites
-# --------------------------------------------------------------------------- #
+# Prerequisites.
 hdr "Checking prerequisites"
 FAIL=0
 
@@ -210,7 +167,7 @@ if have python3; then
   if python3 -c 'import sys; sys.exit(0 if sys.version_info>=(3,9) else 1)'; then
     ok "python3 $PYV"
   else
-    err "python3 $PYV — need >= 3.9"; FAIL=1
+    err "python3 $PYV, need >= 3.9"; FAIL=1
   fi
 else
   err "python3 not found"; FAIL=1
@@ -218,14 +175,14 @@ fi
 
 if have docker; then
   if docker info >/dev/null 2>&1; then ok "docker (daemon reachable)"
-  else warn "docker installed but the daemon is not reachable — needed by Strix and by Cairn container mode"; fi
+  else warn "docker installed but the daemon is not reachable; needed by Strix and by Cairn container mode"; fi
 else
-  warn "docker not found — Strix requires it; Cairn local mode does not"
+  warn "docker not found; Strix requires it, Cairn local mode does not"
 fi
 
 if have uv; then ok "uv $(uv --version 2>/dev/null | awk '{print $2}')"
 elif have pipx; then ok "pipx (no uv)"
-else warn "neither uv nor pipx — Cairn needs uv: https://docs.astral.sh/uv/getting-started/installation/"; fi
+else warn "neither uv nor pipx; Cairn needs uv: https://docs.astral.sh/uv/getting-started/installation/"; fi
 
 if [ "$MODE" = "check" ]; then
   refresh_path
@@ -234,11 +191,11 @@ if [ "$MODE" = "check" ]; then
 else
   # Reported here; installed a few lines below, once the hard failures clear.
   if have strix || [ -x "$HOME/.strix/bin/strix" ]; then ok "strix present"
-  else warn "strix missing — will install it ($INSTALL_METHOD)"; fi
+  else warn "strix missing; will install it ($INSTALL_METHOD)"; fi
   if have hermes || [ -x "$HOME/.local/bin/hermes" ]; then ok "hermes present"
-  else warn "hermes missing — will install it ($INSTALL_METHOD)"; fi
+  else warn "hermes missing; will install it ($INSTALL_METHOD)"; fi
   if [ -d "$HERMES_HOME" ]; then ok "Hermes home: $HERMES_HOME"
-  elif [ "$INSTALL_METHOD" = "none" ]; then warn "no Hermes home at $HERMES_HOME — --detect-only, so nothing was installed"; fi
+  elif [ "$INSTALL_METHOD" = "none" ]; then warn "no Hermes home at $HERMES_HOME; --detect-only, so nothing was installed"; fi
 fi
 
 if [ "$MODE" = "check" ]; then
@@ -264,17 +221,11 @@ if [ "$MODE" = "check" ]; then
 fi
 
 [ "$FAIL" = 0 ] || { echo; err "fix the errors above, then re-run."; exit 1; }
-
-# --------------------------------------------------------------------------- #
-# Strix + Hermes: install whatever is missing
-# --------------------------------------------------------------------------- #
+# Strix + Hermes: install whatever is missing.
 hdr "Strix and Hermes"
-ensure_strix   || warn "Strix is not installed — the discovery layer will be unavailable"
-ensure_hermes  || warn "Hermes is not installed — the control plane will be unavailable"
-
-# --------------------------------------------------------------------------- #
-# Cairn checkout + backend patch
-# --------------------------------------------------------------------------- #
+ensure_strix   || warn "Strix is not installed; the discovery layer will be unavailable"
+ensure_hermes  || warn "Hermes is not installed; the control plane will be unavailable"
+# Cairn checkout + backend patch.
 hdr "Cairn (exploitation layer)"
 if [ -d "$CAIRN_DIR/.git" ]; then
   ok "using existing checkout at $CAIRN_DIR"
@@ -294,10 +245,7 @@ else
   err "upstream Cairn has probably moved. Inspect $PATCH and report it."
   exit 1
 fi
-
-# --------------------------------------------------------------------------- #
-# config + directories
-# --------------------------------------------------------------------------- #
+# Config + directories.
 hdr "Configuration"
 mkdir -p "$ENGAGEMENTS"
 if [ -f "$TRIAD_HOME/.env" ]; then
@@ -305,14 +253,11 @@ if [ -f "$TRIAD_HOME/.env" ]; then
 else
   cp "$TRIAD_HOME/.env.example" "$TRIAD_HOME/.env"
   chmod 600 "$TRIAD_HOME/.env"
-  warn "created .env — fill in your API keys before running a scan"
+  warn "created .env; fill in your API keys before running a scan"
 fi
 mkdir -p "$TRIAD_HOME/datas/cairn"
 ok "engagements: $ENGAGEMENTS"
-
-# --------------------------------------------------------------------------- #
-# Hermes plugin
-# --------------------------------------------------------------------------- #
+# Hermes plugin.
 hdr "Hermes plugin"
 mkdir -p "$HERMES_HOME/plugins"
 if [ -L "$PLUGIN_DST" ] || [ -d "$PLUGIN_DST" ]; then
@@ -325,17 +270,14 @@ DOCTOR_OUT="$(hermes plugins doctor "$PLUGIN_SRC" 2>&1 || true)"
 if printf '%s' "$DOCTOR_OUT" | grep -q "registration passed"; then
   ok "plugin validates ($(printf '%s' "$DOCTOR_OUT" | sed -n 's/.*registrations: //p'))"
 else
-  warn "could not validate the plugin with \`hermes plugins doctor\` — run it yourself once Hermes is on PATH"
+  warn "could not validate the plugin with \`hermes plugins doctor\` ; run it yourself once Hermes is on PATH"
 fi
-
-# --------------------------------------------------------------------------- #
-# CLI wrapper
-# --------------------------------------------------------------------------- #
+# CLI wrapper.
 hdr "CLI"
 mkdir -p "$BIN_DIR"
 cat > "$BIN_DIR/triad" <<EOF
 #!/usr/bin/env bash
-# Installed by triad install.sh — thin wrapper so the CLI works from anywhere.
+# Installed by triad install.sh, a thin wrapper so the CLI works from anywhere.
 export TRIAD_HOME="\${TRIAD_HOME:-$TRIAD_HOME}"
 export CAIRN_BASE_URL="\${CAIRN_BASE_URL:-http://127.0.0.1:8000}"
 export TRIAD_WORKDIR="\${TRIAD_WORKDIR:-$ENGAGEMENTS}"
@@ -346,12 +288,9 @@ ok "$BIN_DIR/triad"
 
 case ":$PATH:" in
   *":$BIN_DIR:"*) ok "$BIN_DIR is on PATH" ;;
-  *) warn "$BIN_DIR is NOT on PATH — add: export PATH=\"$BIN_DIR:\$PATH\"" ;;
+  *) warn "$BIN_DIR is NOT on PATH; add: export PATH=\"$BIN_DIR:\$PATH\"" ;;
 esac
-
-# --------------------------------------------------------------------------- #
-# done
-# --------------------------------------------------------------------------- #
+# Done.
 hdr "Next steps"
 cat <<EOF
   1. Fill in API keys:            \$EDITOR $TRIAD_HOME/.env

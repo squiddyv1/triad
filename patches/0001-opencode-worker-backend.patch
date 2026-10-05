@@ -38,7 +38,7 @@ index 6fc1718..17eae79 100644
 +__all__ = ["ClaudeCodeDriver", "CodexDriver", "PiDriver", "MockDriver", "OpenCodeDriver"]
 diff --git a/cairn/src/cairn/dispatcher/workers/adapters/opencode.py b/cairn/src/cairn/dispatcher/workers/adapters/opencode.py
 new file mode 100644
-index 0000000..2d6a1c4
+index 0000000..313a2ad
 --- /dev/null
 +++ b/cairn/src/cairn/dispatcher/workers/adapters/opencode.py
 @@ -0,0 +1,175 @@
@@ -49,7 +49,7 @@ index 0000000..2d6a1c4
 +Claude Code, Codex or Pi.
 +
 +Why this exists: on hosts where only opencode is installed and authenticated,
-+none of the shipped backends can run — the whole exploitation layer is blocked.
++none of the shipped backends can run, so the whole exploitation layer is blocked.
 +opencode is OpenAI-compatible, speaks JSON events, and supports session
 +continuation, which is all the worker protocol needs.
 +
@@ -73,7 +73,7 @@ index 0000000..2d6a1c4
 +  OPENCODE_CONFIG_CONTENT_JSON
 +                          Container mode only: exact OPENCODE_CONFIG_CONTENT to export,
 +                          for images that need a provider injected. Deliberately not
-+                          synthesised here — the provider-config schema varies by
++                          synthesised here: the provider-config schema varies by
 +                          opencode version, and guessing it silently breaks runs.
 +
 +Container mode is *not* verified on this machine: Cairn's worker image does not

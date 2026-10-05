@@ -1,4 +1,4 @@
-"""Triad — one control plane over Strix (discovery), Cairn (exploitation) and
+"""Triad: one control plane over Strix (discovery), Cairn (exploitation) and
 Hermes (orchestration). Registration entry point."""
 
 from __future__ import annotations

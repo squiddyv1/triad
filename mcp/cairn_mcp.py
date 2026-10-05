@@ -59,7 +59,7 @@ def _guard(fn):
         return {"error": str(e)}
 
 
-# ---- read ----------------------------------------------------------------
+# Read-only tools.
 @mcp.tool()
 def cairn_list_projects() -> list:
     """List Cairn projects with status and fact/intent counts."""
@@ -78,7 +78,7 @@ def cairn_export(project_id: str, format: str = "yaml") -> str:
     return _guard(lambda: _c().export(project_id, format))
 
 
-# ---- write ---------------------------------------------------------------
+# Graph-changing tools, so a caller can filter them out.
 @mcp.tool()
 def cairn_create_project(title: str, origin: str, goal: str, hints: list = None,
                          bootstrap_enabled: bool = True) -> dict:

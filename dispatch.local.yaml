@@ -1,10 +1,10 @@
-# Triad dispatcher config — LOCAL MODE (no Docker, arm64-friendly).
+# Triad dispatcher config: LOCAL MODE (no Docker, arm64-friendly).
 #
 # Use this instead of dispatch.yaml when:
 #   * the host is arm64 and the amd64-only worker image is impractical, or
 #   * you already have a worker CLI installed and logged in on the host.
 #
-# Workers run with your user's permissions and NO SANDBOX — only run this on a
+# Workers run with your user's permissions and NO SANDBOX, so run this on a
 # machine you are authorized to operate from, on a network you control.
 #
 #   uv run --project cairn cairn serve                                   # terminal 1
