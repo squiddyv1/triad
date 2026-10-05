@@ -9,6 +9,7 @@ Start here:
 
     triad                  where things stand; offers setup on a fresh checkout
     triad setup            prompts for API keys, writes .env, offers to start
+    triad auth             write the worker CLI's credentials from .env
     triad up               start the Cairn server and the dispatcher
     triad down             stop them (data is kept)
 
@@ -315,11 +316,16 @@ MODEL_CHOICES = [
     ("Anthropic   anthropic/claude-sonnet-4-5", "anthropic/claude-sonnet-4-5"),
     ("Other       type any provider/model id", "__other__"),
 ]
+# The bundled worker is opencode, so opencode's own providers come first: those get
+# written into its credentials file. The rest are read only by the containerised
+# workers in dispatch.yaml.
 WORKER_KEY_CHOICES = [
-    ("skip: my workers reuse the host CLI's own login", None),
-    ("Anthropic  -> ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_AUTH_TOKEN"),
-    ("DeepSeek   -> DEEPSEEK_API_KEY", "DEEPSEEK_API_KEY"),
-    ("OpenAI     -> OPENAI_API_KEY", "OPENAI_API_KEY"),
+    ("OpenCode Go / Zen -> OPENCODE_GO_API_KEY    (drives the bundled worker)", "OPENCODE_GO_API_KEY"),
+    ("OpenRouter        -> OPENROUTER_API_KEY     (also usable by the worker)", "OPENROUTER_API_KEY"),
+    ("skip               (add keys to .env yourself later)", None),
+    ("DeepSeek          -> DEEPSEEK_API_KEY    (container workers only)", "DEEPSEEK_API_KEY"),
+    ("Anthropic         -> ANTHROPIC_AUTH_TOKEN (container workers only)", "ANTHROPIC_AUTH_TOKEN"),
+    ("OpenAI            -> OPENAI_API_KEY     (container workers only)", "OPENAI_API_KEY"),
 ]
 BIND_CHOICES = [
     ("127.0.0.1  loopback only (safer)", "127.0.0.1"),
@@ -788,6 +794,15 @@ def cmd_setup(args):
     _ok(f"CAIRN_BIND       {merged.get('CAIRN_BIND') or '(compose default)'}")
     _ok(f"CAIRN_BASE_URL   {merged.get('CAIRN_BASE_URL')}")
 
+    # opencode reads its own credentials file, so anything given above goes straight
+    # in. This is what makes a separate interactive `opencode auth login` unnecessary.
+    worker_entries = {provider: merged[var]
+                      for var, provider in OPENCODE_AUTH_KEYS.items() if merged.get(var)}
+    if worker_entries:
+        auth_path = _opencode_auth_set(worker_entries)
+        for provider in sorted(worker_entries):
+            _ok(f"opencode credentials: {provider} -> {auth_path}")
+
     if interactive:
         answer = _ask("Start Cairn and the dispatcher now? (Y/n)", "y")
         if answer is CANCELLED:
@@ -880,9 +895,13 @@ def cmd_up(args):
             _warn("no worker CLI found (opencode, claude, codex or pi)")
             print("     the dispatcher needs one to claim intents, so nothing will move")
             print("     install one:   ./install.sh          (installs opencode)")
-            print("     then sign in:  opencode auth login")
+            print("     then the key:  triad setup            (writes opencode's credentials)")
         else:
             _ok(f"worker CLI: {worker} ({where})")
+            if worker == "opencode" and not _opencode_credentials():
+                _warn("opencode has no credentials yet, so the worker will fail on its")
+                _warn("first model call. Put the key in its auth file with:")
+                print("       triad auth        (reads OPENCODE_GO_API_KEY from .env)")
         config = getattr(args, "config", None) or "dispatch.local.yaml"
         pid, problem = _dispatcher_start(config)
         if problem:
@@ -921,6 +940,99 @@ def cmd_down(args):
             subprocess.run(compose + ["stop", "cairn-server", "cairn-dispatcher"],
                            cwd=str(REPO), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     _ok("data kept in ./datas/cairn; use 'make down' to remove the containers too")
+    return 0
+
+
+def _opencode_auth_path():
+    """Where opencode keeps credentials.
+
+    It follows XDG_DATA_HOME like the rest of the CLI, so honour that instead of
+    hardcoding ~/.local/share.
+    """
+    base = os.environ.get("XDG_DATA_HOME") or (Path.home() / ".local" / "share")
+    return Path(base) / "opencode" / "auth.json"
+
+
+# .env variable -> opencode auth provider name. Writing the file this way is what
+# makes `opencode auth login` unnecessary: the CLI reads it directly.
+OPENCODE_AUTH_KEYS = {
+    "OPENCODE_GO_API_KEY": "opencode-go",
+    "OPENROUTER_API_KEY": "openrouter",
+}
+
+
+def _opencode_auth_set(entries):
+    """Merge {provider: key} into opencode's auth.json, leaving other providers be.
+
+    The file holds keys, so it is chmod 600. An unreadable or malformed file is
+    replaced rather than merged, since a partial JSON parse would lose credentials
+    the user still has.
+    """
+    path = _opencode_auth_path()
+    data = {}
+    if path.is_file():
+        try:
+            existing = json.loads(path.read_text(encoding="utf-8") or "{}")
+            if isinstance(existing, dict):
+                data = existing
+        except (ValueError, OSError):
+            data = {}
+    for provider, key in entries.items():
+        data[provider] = {"type": "api", "key": key}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    path.chmod(0o600)
+    return path
+
+
+def _opencode_credentials():
+    """Provider names opencode currently has a usable api key for."""
+    path = _opencode_auth_path()
+    if not path.is_file():
+        return []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8") or "{}")
+    except (ValueError, OSError):
+        return []
+    if not isinstance(data, dict):
+        return []
+    return sorted(name for name, entry in data.items()
+                  if isinstance(entry, dict) and entry.get("key"))
+
+
+def cmd_auth(args):
+    """Write the worker CLI's credentials from .env.
+
+    Removes the interactive step: opencode reads its own auth file, so the key can
+    be placed there directly instead of asking the user to run `auth login`.
+    """
+    _hdr("Worker credentials")
+    env = _env_read()
+    if getattr(args, "show", False):
+        providers = _opencode_credentials()
+        if providers:
+            _ok(f"{_opencode_auth_path()}")
+            for name in providers:
+                _ok(f"  {name}: configured")
+        else:
+            _warn(f"no credentials in {_opencode_auth_path()}")
+            print("     add one with:  triad auth        (reads OPENCODE_GO_API_KEY)")
+        return 0
+
+    key = getattr(args, "key", None)
+    if key:
+        entries = {getattr(args, "provider", None) or "opencode-go": key}
+    else:
+        entries = {provider: env[var]
+                   for var, provider in OPENCODE_AUTH_KEYS.items() if env.get(var)}
+    if not entries:
+        _warn(f"no worker key found in {_env_path()}")
+        print("     set one:  triad setup        (or add OPENCODE_GO_API_KEY to .env)")
+        return 2
+    path = _opencode_auth_set(entries)
+    for provider in sorted(entries):
+        _ok(f"{provider} -> {path}")
+    _ok("opencode uses this directly; no interactive login needed")
     return 0
 
 
@@ -987,6 +1099,12 @@ def main(argv=None):
     dn = sub.add_parser("down", help="stop the dispatcher and the Cairn server")
     dn.add_argument("--keep-server", action="store_true", help="stop only the dispatcher")
     dn.set_defaults(func=cmd_down)
+
+    au = sub.add_parser("auth", help="write the worker CLI's credentials from .env")
+    au.add_argument("--key", help="key to write (default: read OPENCODE_GO_API_KEY from .env)")
+    au.add_argument("--provider", help="opencode provider name (default: opencode-go)")
+    au.add_argument("--show", action="store_true", help="report what is configured, write nothing")
+    au.set_defaults(func=cmd_auth)
 
     e = sub.add_parser("engage", help="create a Cairn project for a target")
     e.add_argument("--title", required=True)

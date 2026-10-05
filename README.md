@@ -81,7 +81,7 @@ What it does, in order:
 1. checks prerequisites and reports exactly what is missing;
 2. installs uv if it is absent (Cairn's runner, and what `triad up` uses);
 3. installs opencode if no worker CLI is present, since the dispatcher needs one
-   to claim intents (it still needs `opencode auth login` afterwards);
+   to claim intents;
 4. installs Docker if it is absent, starts the daemon, adds you to the `docker`
    group and ensures the compose v2 plugin;
 5. installs Strix if it is absent (see the method knobs below);
@@ -147,7 +147,7 @@ Every path is overridable, so nothing is machine-specific:
 |---|---|
 | Python | ≥ 3.9 for the CLI (the installer checks) |
 | Docker | installed if missing by default: the daemon is started and the invoking user is added to the `docker` group; `--no-docker` to only report it |
-| Worker CLI | opencode is installed if none of opencode/claude/codex/pi is present; it needs its own login (`opencode auth login`) before the dispatcher can use it |
+| Worker CLI | opencode is installed if none of opencode/claude/codex/pi is present. Its key goes into opencode's own credentials file (`triad setup` writes it, or `triad auth`), so no interactive login is needed |
 | Strix | Docker running; `pipx install strix-agent` or `curl -sSL https://strix.ai/install \| bash`; an LLM key |
 | Cairn | `uv` (installed if missing) + Docker **and the `docker compose` v2 plugin** for container mode, **or** local mode reusing a host worker CLI |
 | Hermes (optional) | a Hermes install, only for the control plane; `mcp<2` for the MCP bridge (`uv run --with 'mcp<2'`) |
@@ -170,7 +170,14 @@ things stand. Each step is also available on its own:
 triad up         # start the Cairn server and the dispatcher
 triad down       # stop them (data is kept); --keep-server stops only the dispatcher
 triad status     # list projects, or one graph with --project
+triad auth       # (re)write the worker CLI's key from .env; --show to inspect
 ```
+
+The worker CLI needs a key, and it does **not** need `opencode auth login`: `triad
+setup` puts `OPENCODE_GO_API_KEY` (or `OPENROUTER_API_KEY`) straight into
+opencode's own credentials file, `~/.local/share/opencode/auth.json`, as
+`{"<provider>": {"type": "api", "key": "..."}}` at mode 600. `triad auth` does the
+same on its own, merging rather than replacing anything already there.
 
 The server and the dispatcher are **separate processes**, and a project will not
 move until the dispatcher is running. `triad up` runs the dispatcher on the host,

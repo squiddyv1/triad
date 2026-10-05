@@ -464,8 +464,9 @@ ensure_worker_cli() {
   refresh_path
   if worker_present; then
     ok "opencode installed ($("$(worker_bin_path)" --version 2>/dev/null | head -1))"
-    warn "it still needs an LLM login before the dispatcher can use it:"
-    warn "  opencode auth login       (or put OPENCODE_GO_API_KEY in .env)"
+    warn "it still needs an LLM key. Do not run 'opencode auth login': put the key in"
+    warn "opencode's credentials file instead, with:   triad auth"
+    warn "  (triad setup writes it for you, from OPENCODE_GO_API_KEY)"
   else
     warn "opencode installed, but not on PATH in this shell yet; open a new shell"
   fi
