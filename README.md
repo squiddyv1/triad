@@ -40,23 +40,55 @@ cd triad
 ./install.sh
 ```
 
-`install.sh` is idempotent and does five things:
+`install.sh` is idempotent. By default it installs this harness and Cairn, and
+**only detects** Strix and Hermes — a machine that already runs them is never
+touched. Pass a flag for a genuine one-shot bootstrap:
+
+| | default | `--with-strix` | `--with-hermes` | `--all` |
+|---|---|---|---|---|
+| **Triad harness** (plugin, CLI, contracts) | install | install | install | install |
+| **Cairn** (cloned + patched) | install | install | install | install |
+| **Strix** | detect only | install if missing | detect only | install if missing |
+| **Hermes** | detect only | detect only | install if missing | install if missing |
+
+What it does, in order:
 
 1. checks prerequisites and reports exactly what is missing;
-2. clones Cairn and applies `patches/0001-opencode-worker-backend.patch`
+2. installs the optional layers you asked for — preferring the package manager
+   (`uv tool install strix-agent` / `hermes-agent`, else `pipx`) over piping an
+   installer into a shell; if neither exists it downloads the official script to
+   a temp file, prints its size and sha256, and runs *that*, never a blind
+   `curl | bash`;
+3. clones Cairn and applies `patches/0001-opencode-worker-backend.patch`
    (upstream Cairn is never vendored into this repo);
-3. creates `.env` from `.env.example` and the engagement directory;
-4. symlinks the Hermes plugin into `$HERMES_HOME/plugins/triad` and validates it
+4. creates `.env` from `.env.example` and the engagement directory;
+5. symlinks the Hermes plugin into `$HERMES_HOME/plugins/triad` and validates it
    with `hermes plugins doctor`;
-5. installs a `triad` wrapper into `~/.local/bin` so the CLI works from anywhere.
-
-Verify, repair, or remove at any time:
+6. installs a `triad` wrapper into `~/.local/bin` so the CLI works from anywhere.
 
 ```bash
+./install.sh --all          # bootstrap everything missing, including the other two layers
+./install.sh --with-strix   # just Strix
 ./install.sh --check        # report install health, change nothing
 ./install.sh                # re-run to repair
-./install.sh --uninstall    # remove the symlinks it created
+./install.sh --uninstall    # remove the symlinks it created (leaves Strix/Hermes alone)
 ```
+
+Docker and `uv` are checked but never installed — both have their own
+installers and installing them silently is not this script's call.
+
+Two knobs on how the optional layers are installed:
+
+- `TRIAD_INSTALL_METHOD=pkg|script` (default `pkg`) — `pkg` uses
+  `uv tool install` / `pipx`; `script` uses the vendor installer.
+- `STRIX_INSTALL_METHOD` / `HERMES_INSTALL_METHOD` override that per layer.
+
+`pkg` is the default because the result is pinned and uninstallable, but **PyPI
+can lag the vendor channel** — `hermes-agent` there is 0.19.0 while the official
+script tracks 0.21.x. Use `HERMES_INSTALL_METHOD=script` if you want the current
+release rather than the pinned one. Whichever path runs, nothing is piped
+straight into a shell: the script is downloaded to a temp file, and its size and
+sha256 are printed before it executes.
 
 Every path is overridable, so nothing is machine-specific:
 

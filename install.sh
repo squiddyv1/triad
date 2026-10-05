@@ -2,9 +2,16 @@
 #
 # Triad installer — Strix (discovery) + Cairn (exploitation) + Hermes (control plane).
 #
-#   ./install.sh              install into this checkout
-#   ./install.sh --check      verify an existing install, change nothing
-#   ./install.sh --uninstall  remove the symlinks this script created
+#   ./install.sh                 install the harness; detect the other layers
+#   ./install.sh --all           also install Strix and Hermes if missing
+#   ./install.sh --with-strix    also install Strix if missing
+#   ./install.sh --with-hermes   also install Hermes if missing
+#   ./install.sh --check         verify an existing install, change nothing
+#   ./install.sh --uninstall     remove the symlinks this script created
+#
+# Flags can be combined. By default nothing is installed except Cairn: Strix and
+# Hermes are detected and reported, so a machine that already runs them is never
+# touched. `--with-*` is the opt-in for a genuine one-shot bootstrap.
 #
 # Everything is configurable through environment variables:
 #   TRIAD_HOME    where the harness lives        (default: this script's directory)
@@ -29,20 +36,111 @@ PATCH="$TRIAD_HOME/patches/0001-opencode-worker-backend.patch"
 PLUGIN_SRC="$TRIAD_HOME/hermes/plugin-triad"
 PLUGIN_DST="$HERMES_HOME/plugins/triad"
 
+# Official installers, used only as a fallback when no package manager is present.
+STRIX_INSTALL_URL="https://strix.ai/install"
+HERMES_INSTALL_URL="https://hermes-agent.nousresearch.com/install.sh"
+
 MODE="install"
-case "${1:-}" in
-  --check)     MODE="check" ;;
-  --uninstall) MODE="uninstall" ;;
-  -h|--help)   sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
-  "")          ;;
-  *)           echo "unknown option: $1 (try --help)" >&2; exit 2 ;;
-esac
+WITH_STRIX=0
+WITH_HERMES=0
+for arg in "$@"; do
+  case "$arg" in
+    --check)       MODE="check" ;;
+    --uninstall)   MODE="uninstall" ;;
+    --with-strix)  WITH_STRIX=1 ;;
+    --with-hermes) WITH_HERMES=1 ;;
+    --all)         WITH_STRIX=1; WITH_HERMES=1 ;;
+    -h|--help)     sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *)             echo "unknown option: $arg (try --help)" >&2; exit 2 ;;
+  esac
+done
 
 ok()   { printf '  \033[32m✓\033[0m %s\n' "$*"; }
 warn() { printf '  \033[33m!\033[0m %s\n' "$*"; }
 err()  { printf '  \033[31m✗\033[0m %s\n' "$*" >&2; }
 hdr()  { printf '\n\033[1m%s\033[0m\n' "$*"; }
 have() { command -v "$1" >/dev/null 2>&1; }
+
+# --------------------------------------------------------------------------- #
+# helpers: install a missing layer
+# --------------------------------------------------------------------------- #
+# Prefer a package manager (pinned, verifiable, uninstallable) over piping an
+# installer script into a shell. The script path is a last resort and is always
+# downloaded, sized, hashed and shown first — never a blind `curl | bash`.
+#
+# KNOWN TRADEOFF: PyPI can lag the vendor's own installer. `hermes-agent` on
+# PyPI is 0.19.0 while the official script tracks the current release (0.21.x).
+# Set HERMES_INSTALL_METHOD=script (or STRIX_INSTALL_METHOD=script) to follow the
+# vendor channel instead, or =pkg to force the package manager.
+INSTALL_METHOD="${TRIAD_INSTALL_METHOD:-pkg}"
+
+pkg_install() {  # name-on-pypi
+  local pkg="$1"
+  if have uv; then
+    echo "    uv tool install $pkg"
+    uv tool install "$pkg"
+    return $?
+  fi
+  if have pipx; then
+    echo "    pipx install $pkg"
+    pipx install "$pkg"
+    return $?
+  fi
+  return 127   # no package manager available
+}
+
+script_install() {  # url
+  local url="$1" tmp
+  tmp="$(mktemp -t triad-installer.XXXXXX.sh)"
+  curl -fsSL "$url" -o "$tmp"
+  echo "    downloaded $url"
+  echo "    -> $tmp  ($(wc -c <"$tmp") bytes, sha256 $(sha256sum "$tmp" | cut -c1-32)…)"
+  echo "    running it now; review $tmp if you want to see what it did"
+  bash "$tmp"
+}
+
+# install_layer <pypi-name> <script-url> <method> <command-to-verify> <label>
+install_layer() {
+  local pkg="$1" url="$2" method="$3" cmd="$4" label="$5"
+  case "$method" in
+    script)
+      echo "  installing $label (vendor script)"
+      script_install "$url" || { err "$label install failed"; return 1; }
+      ;;
+    pkg)
+      echo "  installing $label (PyPI: $pkg)"
+      if ! pkg_install "$pkg"; then
+        warn "no package manager, or it failed — falling back to the vendor script"
+        script_install "$url" || { err "$label install failed"; return 1; }
+      fi
+      ;;
+    *) err "unknown install method '$method' (use pkg or script)"; return 2 ;;
+  esac
+  hash -r 2>/dev/null || true
+  if have "$cmd"; then
+    ok "$label installed ($("$cmd" --version 2>/dev/null | head -1))"
+  elif [ -x "$HOME/.strix/bin/$cmd" ]; then
+    ok "$label installed ($HOME/.strix/bin/$cmd)"
+  else
+    warn "$label installed, but '$cmd' is not on PATH yet — add ~/.local/bin to it"
+  fi
+}
+
+ensure_strix() {
+  if have strix || [ -x "$HOME/.strix/bin/strix" ]; then ok "strix already present"; return 0; fi
+  install_layer strix-agent "$STRIX_INSTALL_URL" \
+                "${STRIX_INSTALL_METHOD:-$INSTALL_METHOD}" strix Strix
+  echo "    note: Strix's sandbox image is pulled on first scan and needs Docker"
+}
+
+ensure_hermes() {
+  if have hermes; then ok "hermes already present"; return 0; fi
+  install_layer hermes-agent "$HERMES_INSTALL_URL" \
+                "${HERMES_INSTALL_METHOD:-$INSTALL_METHOD}" hermes Hermes
+  if [ "${HERMES_INSTALL_METHOD:-$INSTALL_METHOD}" = "pkg" ]; then
+    warn "PyPI can lag the vendor channel — use HERMES_INSTALL_METHOD=script for the current release"
+  fi
+}
 
 # --------------------------------------------------------------------------- #
 # uninstall
@@ -52,6 +150,7 @@ if [ "$MODE" = "uninstall" ]; then
   [ -L "$PLUGIN_DST" ] && rm -f "$PLUGIN_DST" && ok "removed plugin symlink $PLUGIN_DST"
   [ -f "$BIN_DIR/triad" ] && rm -f "$BIN_DIR/triad" && ok "removed $BIN_DIR/triad"
   warn "kept: $CAIRN_DIR, $TRIAD_HOME/.env, $ENGAGEMENTS (delete manually if you want them gone)"
+  warn "Strix and Hermes are separate installs — this does not touch them"
   exit 0
 fi
 
@@ -80,13 +179,22 @@ else
 fi
 
 if have uv; then ok "uv $(uv --version 2>/dev/null | awk '{print $2}')"
-else warn "uv not found — Cairn needs it: https://docs.astral.sh/uv/getting-started/installation/"; fi
+elif have pipx; then ok "pipx (no uv)"
+else warn "neither uv nor pipx — Cairn needs uv: https://docs.astral.sh/uv/getting-started/installation/"; fi
 
-if have strix || [ -x "$HOME/.strix/bin/strix" ]; then ok "strix present"
-else warn "strix not found — install it (see README) or set PATH to include ~/.strix/bin"; fi
+if [ "$MODE" = "check" ]; then
+  have strix || [ -x "$HOME/.strix/bin/strix" ] && ok "strix present" || warn "strix not found"
+  have hermes && ok "hermes present" || warn "hermes not found"
+elif [ "$WITH_STRIX" = 1 ] || [ "$WITH_HERMES" = 1 ]; then
+  # fine — handled below, after the hard failures are cleared
+  :
+elif have strix || [ -x "$HOME/.strix/bin/strix" ]; then ok "strix present"
+else warn "strix not found — pass --with-strix to install it, or see README"; fi
 
-if [ -d "$HERMES_HOME" ]; then ok "Hermes home: $HERMES_HOME"
-else warn "no Hermes home at $HERMES_HOME — the plugin step will create it, but Hermes must be installed to use it"; fi
+if [ "$MODE" != "check" ] && { [ "$WITH_STRIX" = 0 ] && [ "$WITH_HERMES" = 0 ]; }; then
+  if [ -d "$HERMES_HOME" ]; then ok "Hermes home: $HERMES_HOME"
+  else warn "no Hermes home at $HERMES_HOME — pass --with-hermes to install Hermes"; fi
+fi
 
 if [ "$MODE" = "check" ]; then
   hdr "Install check"
@@ -111,6 +219,16 @@ if [ "$MODE" = "check" ]; then
 fi
 
 [ "$FAIL" = 0 ] || { echo; err "fix the errors above, then re-run."; exit 1; }
+
+# --------------------------------------------------------------------------- #
+# optional layers: Strix, Hermes
+# --------------------------------------------------------------------------- #
+if [ "$WITH_STRIX" = 1 ] || [ "$WITH_HERMES" = 1 ]; then
+  hdr "Optional layers"
+  [ "$WITH_STRIX" = 1 ]   && ensure_strix   || true
+  [ "$WITH_HERMES" = 1 ] && ensure_hermes || true
+  hash -r 2>/dev/null || true   # pick up anything newly installed on PATH
+fi
 
 # --------------------------------------------------------------------------- #
 # Cairn checkout + backend patch
