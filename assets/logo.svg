@@ -3,6 +3,15 @@
     Triad mark: three components around one flow.
     Solid edge, Strix to Cairn, is the path that does the work; the dashed ones are the
     optional control layer. Colours match the banner and the README.
+
+    Long opaque dashes rather than fine ones, so the mark still reads at 32-64px where a
+    tight dash pattern blurs into noise. Every element clears 3:1 against the tile (nodes
+    6.2:1 or better, the dashed edges 5:1).
+
+    The triangle is centred by its bounding box, x 34.7..145.3 and y 38.5..137.5 in its
+    own 180-unit box, then nudged 2 units up because a base of two nodes carries more
+    weight than the single vertex. Its bbox centre lands at (90, 88) against a box centre
+    of (90, 90), which is why the group is translated a plain 22,22 and nothing else.
   -->
   <title>Triad</title>
   <defs>
@@ -11,7 +20,7 @@
       <stop offset="1" stop-color="#070a0f"/>
     </linearGradient>
     <radialGradient id="mark-glow" cx="50%" cy="40%" r="60%">
-      <stop offset="0" stop-color="#22d3ee" stop-opacity="0.28"/>
+      <stop offset="0" stop-color="#22d3ee" stop-opacity="0.26"/>
       <stop offset="1" stop-color="#22d3ee" stop-opacity="0"/>
     </radialGradient>
     <linearGradient id="mark-edge" x1="0" y1="1" x2="1" y2="0">
@@ -26,20 +35,20 @@
 
   <g transform="translate(22,22) scale(2.6)">
     <!-- Hermes: present if you want it, which is what the dashes say -->
-    <line x1="50.2" y1="113" x2="90" y2="44" stroke="#a78bfa" stroke-width="3.2"
-          stroke-dasharray="7 6" stroke-linecap="round" opacity="0.7"/>
-    <line x1="50.2" y1="113" x2="129.8" y2="113" stroke="#a78bfa" stroke-width="3.2"
-          stroke-dasharray="7 6" stroke-linecap="round" opacity="0.7"/>
+    <line x1="46.7" y1="125.5" x2="90" y2="50.5" stroke="#a78bfa" stroke-width="3.4"
+          stroke-dasharray="9 7" stroke-linecap="round" opacity="0.85"/>
+    <line x1="46.7" y1="125.5" x2="133.3" y2="125.5" stroke="#a78bfa" stroke-width="3.4"
+          stroke-dasharray="9 7" stroke-linecap="round" opacity="0.85"/>
 
     <!-- Strix feeds Cairn: the flow the whole project is about -->
-    <line x1="90" y1="44" x2="129.8" y2="113" stroke="url(#mark-edge)" stroke-width="6"
+    <line x1="90" y1="50.5" x2="133.3" y2="125.5" stroke="url(#mark-edge)" stroke-width="6"
           stroke-linecap="round"/>
 
-    <circle cx="90" cy="44" r="11.5" fill="#22d3ee"/>
-    <circle cx="129.8" cy="113" r="11.5" fill="#fbbf24"/>
-    <circle cx="50.2" cy="113" r="11.5" fill="#a78bfa"/>
-    <circle cx="90" cy="44" r="4.5" fill="#070a0f"/>
-    <circle cx="129.8" cy="113" r="4.5" fill="#070a0f"/>
-    <circle cx="50.2" cy="113" r="4.5" fill="#070a0f"/>
+    <circle cx="90" cy="50.5" r="12" fill="#22d3ee"/>
+    <circle cx="133.3" cy="125.5" r="12" fill="#fbbf24"/>
+    <circle cx="46.7" cy="125.5" r="12" fill="#a78bfa"/>
+    <circle cx="90" cy="50.5" r="5.2" fill="#070a0f"/>
+    <circle cx="133.3" cy="125.5" r="5.2" fill="#070a0f"/>
+    <circle cx="46.7" cy="125.5" r="5.2" fill="#070a0f"/>
   </g>
 </svg>
