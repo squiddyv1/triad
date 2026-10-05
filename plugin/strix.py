@@ -16,12 +16,18 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import shutil
 import subprocess
 from pathlib import Path
 
 COVERAGE_RULE_PREFIX = "strix-coverage/"
+
+# Where scans, reports and engagement artifacts live when nothing overrides it.
+DEFAULT_WORKDIR = "~/engagements"
+
+# Label Cairn records for leads this stack posts, so the graph shows where a lead came
+# from. Not "hermes": the driver posts these, and Hermes is optional.
+FEED_CREATOR = "triad.strix"
 
 
 def _resolve_bin() -> str:
@@ -30,6 +36,29 @@ def _resolve_bin() -> str:
         return found
     home_bin = Path.home() / ".strix" / "bin" / "strix"
     return str(home_bin) if home_bin.exists() else "strix"
+
+
+def available() -> bool:
+    """Whether a Strix binary can actually be run, wherever it was installed.
+
+    Single source of truth for the install layout: the CLI asked this question with its
+    own copy of the ~/.strix/bin guess, which would drift from this one.
+    """
+    return bool(shutil.which("strix")) or (Path.home() / ".strix" / "bin" / "strix").exists()
+
+
+def post_leads(client, project_id, run, anchor="origin"):
+    """Post a run's leads into the graph. Returns (hint_ids, intent_ids).
+
+    Both front ends (the CLI and the Hermes tools) feed the same graph, so the posting
+    lives here once instead of being copied into each of them.
+    """
+    hints, intents = to_cairn_leads(run)
+    hints_posted = [client.add_hint(project_id, f"[strix] {h}", FEED_CREATOR).get("id")
+                    for h in hints]
+    intents_posted = [client.add_intent(project_id, [anchor], d, FEED_CREATOR).get("id")
+                      for d in intents]
+    return hints_posted, intents_posted
 
 
 def run_scan(target, cwd, instruction_file=None, instruction=None, scan_mode="quick",

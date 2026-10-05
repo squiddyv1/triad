@@ -169,6 +169,10 @@ write", not a prompt asking the model to be careful.
 7. report      path + per-fact evidence + coverage gaps + $ cost per objective
 ```
 
+`triad engage` runs steps 1 to 4 in one command, and holds the dispatcher until the feed
+lands: a project that exists before its input does is a project Cairn will bootstrap on an
+empty graph.
+
 Steps 2–4 can be fanned out across targets in parallel (that is exactly what Strix's
 633-hours-in-195-hours number represents); steps 5–6 are bounded by
 `runtime.max_running_projects` so the bill stays legible.
@@ -184,7 +188,9 @@ Mirror the campaign's routing, with the cost discipline attached:
 | Cairn `reason`/`bootstrap` | decide the graph's next move | strong (V4 Pro / Opus-class) | these are the real decision points |
 | Hermes | orchestrate, gate, report | strongest available | few calls, each high impact |
 
-`dispatch.yaml` ships exactly this split.
+`dispatch.yaml` ships exactly this split. `triad setup` sets one provider for both layers;
+`triad configure` splits them when Strix and the worker should not share one, and
+`triad models` lists what a provider serves so no model id has to be guessed.
 
 ---
 

@@ -45,8 +45,6 @@ if FastMCP is None:  # pragma: no cover
 
 mcp = FastMCP("cairn")
 
-READ_TOOLS = ["cairn_list_projects", "cairn_get_project", "cairn_export"]
-
 
 def _c() -> Cairn:
     return Cairn(os.environ.get("CAIRN_BASE_URL", "http://127.0.0.1:8000"))

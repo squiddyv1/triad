@@ -8,8 +8,6 @@ import os
 
 from . import cairn, strix
 
-DEFAULT_WORKDIR = os.path.expanduser("~/engagements")
-
 
 def _client() -> cairn.Cairn:
     return cairn.Cairn(os.environ.get("CAIRN_BASE_URL", cairn.DEFAULT_BASE))
@@ -17,11 +15,13 @@ def _client() -> cairn.Cairn:
 
 def _workdir(args: dict) -> str:
     return os.path.expanduser(args.get("workdir") or os.environ.get("TRIAD_WORKDIR")
-                              or DEFAULT_WORKDIR)
+                              or strix.DEFAULT_WORKDIR)
 
 
 def _ok(**kw) -> str:
     return json.dumps({"ok": True, **kw})
+
+
 def _err(msg) -> str:
     return json.dumps({"ok": False, "error": str(msg)})
 
@@ -123,15 +123,8 @@ def strix_findings(args: dict, **kwargs) -> str:
 def triad_feed(args: dict, **kwargs) -> str:
     try:
         run = strix.read_run(_workdir(args), args.get("run_name"))
-        hints, intents = strix.to_cairn_leads(run)
-        c = _client()
-        pid = args["project_id"]
-        anchor = args.get("anchor_fact", "origin")
-        posted_h, posted_i = [], []
-        for h in hints:
-            posted_h.append(c.add_hint(pid, f"[strix] {h}", "hermes.strix").get("id"))
-        for d in intents:
-            posted_i.append(c.add_intent(pid, [anchor], d, "hermes.strix").get("id"))
+        posted_h, posted_i = strix.post_leads(_client(), args["project_id"], run,
+                                              args.get("anchor_fact", "origin"))
         return _ok(run=run.get("run"), findings=len(run.get("findings", [])),
                    coverage_gaps=len(run.get("coverage_gaps", [])),
                    hints_posted=posted_h, intents_posted=posted_i)

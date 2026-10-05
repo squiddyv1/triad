@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import urllib.error
 import urllib.request
+from typing import Any
 
 DEFAULT_BASE = "http://127.0.0.1:8000"
 
@@ -47,7 +48,8 @@ class Cairn:
         self.base = base_url.rstrip("/")
         self.timeout = timeout
 
-    def _call(self, method: str, path: str, body: dict | None = None):
+    def _call(self, method: str, path: str, body: dict | None = None) -> Any:
+        """Return the decoded JSON body, or None when the response has none."""
         data = json.dumps(body).encode() if body is not None else None
         req = urllib.request.Request(
             f"{self.base}{path}", data=data, method=method,
@@ -119,20 +121,21 @@ class Cairn:
             "worker": creator if claim else None,
         })
 
+    def _intent_action(self, project_id, intent_id, worker, action, **extra):
+        return self._call("POST", f"/projects/{project_id}/intents/{intent_id}/{action}",
+                          {"worker": worker, **extra})
+
     def conclude_intent(self, project_id, intent_id, fact_description, worker) -> dict:
-        return self._call("POST",
-                          f"/projects/{project_id}/intents/{intent_id}/conclude",
-                          {"worker": worker, "description": fact_description})
+        return self._intent_action(project_id, intent_id, worker, "conclude",
+                                   description=fact_description)
 
     def heartbeat_intent(self, project_id, intent_id, worker) -> dict:
-        return self._call("POST",
-                          f"/projects/{project_id}/intents/{intent_id}/heartbeat",
-                          {"worker": worker})
+        """Keep a claimed intent alive so the dispatcher does not reclaim it."""
+        return self._intent_action(project_id, intent_id, worker, "heartbeat")
 
     def release_intent(self, project_id, intent_id, worker) -> dict:
-        return self._call("POST",
-                          f"/projects/{project_id}/intents/{intent_id}/release",
-                          {"worker": worker})
+        """Hand a claimed intent back without concluding it."""
+        return self._intent_action(project_id, intent_id, worker, "release")
 
     def complete(self, project_id, from_facts, description, worker) -> dict:
         """Declare goal reached. Creates an edge from_facts -> goal."""

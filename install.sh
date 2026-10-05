@@ -162,9 +162,8 @@ install_layer() {
   fi
 }
 
-# Docker. The one prerequisite the harness cannot work around: Strix runs its
-# agent in a sandbox container, and Cairn's default mode is compose. Installed by
-# default; --no-docker or DOCKER_INSTALL_METHOD=none only reports it.
+# Docker: the one prerequisite the stack cannot work around, since Strix sandboxes its agent
+# in a container and Cairn's default mode is compose.
 docker_present()   { have "$DOCKER_BIN"; }
 docker_daemon_up() { docker_present && "$DOCKER_BIN" info >/dev/null 2>&1; }
 
@@ -176,11 +175,8 @@ as_root() {
   fi
 }
 
-# Docker publishes packages only for the distros below. On a derivative (Kali,
-# Parrot, Mint, Pop) get.docker.com takes its "*)" branch: it maps the distro to
-# debian but keeps VERSION_ID as the version, so it asks for `debian kali-rolling`,
-# which has no Release file. That also leaves an apt source behind which breaks
-# every later apt call, so the route is picked up front.
+# Docker publishes packages only for the distros below; on a derivative the vendor script asks
+# for `debian kali-rolling`, whose missing Release file also leaves apt broken.
 DOCKER_OFFICIAL_IDS="debian ubuntu raspbian fedora centos rhel rocky almalinux amzn sles opensuse-leap opensuse-tumbleweed"
 DOCKER_APT_LIST="${DOCKER_APT_LIST:-/etc/apt/sources.list.d/docker.list}"
 
@@ -217,9 +213,8 @@ docker_apt_repair() {
   return 0
 }
 
-# Distro route, which is the documented one on derivatives. Package names differ
-# per family, so each case is explicit. docker.io is the engine on Debian-likes:
-# Kali's own `docker` package is unrelated to containers, so it is never used.
+# Distro route, the documented one on derivatives. Package names differ per family, and Kali's
+# own `docker` package is unrelated to containers, so it is never used.
 pkg_docker() {
   if have apt-get; then
     as_root apt-get update -qq
@@ -268,9 +263,8 @@ docker_script_install() {
   rm -f "$tmp"
 }
 
-# `docker info` failing does not mean the daemon is down. Without group membership
-# it fails with "permission denied" on a perfectly healthy daemon, and trying to
-# start the daemon in that case produces a failure report that is simply wrong.
+# `docker info` fails with "permission denied" on a healthy daemon when the user is not in the
+# docker group, so this failure alone does not mean the daemon is down.
 docker_perm_denied() {
   docker_present || return 1
   local out
@@ -291,9 +285,8 @@ wait_for_docker_daemon() {
   return 1
 }
 
-# Start the daemon, and if it will not start, report what the init system said.
-# Discarding that output is why the only thing a user could tell us was "could not
-# start the docker daemon automatically", which names no cause and no next step.
+# Start the daemon, and report what the init system said when it will not start: swallowing that
+# output is how a user ends up with "could not start the docker daemon automatically".
 start_docker_daemon() {
   local out rc
   if have systemctl; then
@@ -650,24 +643,16 @@ if [ "$MODE" = "check" ]; then
 fi
 
 [ "$FAIL" = 0 ] || { echo; err "fix the errors above, then re-run."; exit 1; }
-#
-# uv is Cairn's runner and what `triad up` starts the server and dispatcher with.
-# It is small and needs no root, so there is no reason to leave it missing.
+# uv is Cairn's runner and what `triad up` starts things with; small, no root needed.
 hdr "uv"
 ensure_uv || warn "uv is not available; Cairn and 'triad up' need it"
-#
-# The dispatcher drives a worker CLI on the host in local mode. With none
-# installed, Cairn sits idle and the run looks hung rather than failing.
+# The dispatcher drives a worker CLI in local mode; with none, Cairn sits idle and looks hung.
 hdr "Worker CLI (opencode)"
 ensure_worker_cli || warn "no worker CLI; the dispatcher will have nothing to claim intents"
-#
-# Docker next: Strix's sandbox and the Cairn server both need it, so leaving it
-# until last would install layers that cannot run.
+# Docker before Strix: both need it, so Strix first would add a layer that cannot run.
 hdr "Docker"
 ensure_docker || warn "docker is not usable; Strix will not run until it is"
-#
-# Strix: install it if missing. It is the discovery layer, so the normal
-# Strix -> Cairn flow depends on it.
+# Strix, the discovery layer: the normal Strix -> Cairn flow depends on it.
 hdr "Strix (discovery layer)"
 ensure_strix   || warn "Strix is not installed; the discovery layer will be unavailable"
 # Hermes: optional, and only touched when asked for. Rather than a no-op flag,

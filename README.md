@@ -90,7 +90,7 @@ official script tracks 0.21.x).
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `TRIAD_HOME` | script directory | where the harness lives |
+| `TRIAD_HOME` | script directory | where triad lives |
 | `CAIRN_DIR` | `$TRIAD_HOME/cairn` | where Cairn is cloned |
 | `HERMES_HOME` | `~/.hermes` | which Hermes profile to extend |
 | `BIN_DIR` | `~/.local/bin` | where the `triad` CLI goes |

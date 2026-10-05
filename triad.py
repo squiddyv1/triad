@@ -1,40 +1,16 @@
 #!/usr/bin/env python3
 """triad: command-line driver for the Strix + Cairn stack.
 
-This is the normal entry point, and it needs no agent framework: it loads the
-`plugin/` package directly. Hermes, when installed, exposes that same package as
-tools, so the engagement loop can equally run from a chat session.
+The normal entry point, and it needs no agent framework: it loads `plugin/` directly.
+Hermes, when installed, exposes that same package as tools.
 
-Start here:
+    triad setup     one provider for Strix and the worker, then start the stack
+    triad engage    create the project, run the scan, feed the findings into the graph
+    triad report    write it up
 
-    triad                  where things stand; offers setup on a fresh checkout
-    triad setup            one provider for Strix and the worker: keys, then start
-    triad configure        give Strix and the worker different providers or models
-    triad models           list what a provider serves, so no id has to be guessed
-    triad auth             write the worker CLI's credentials from .env
-    triad up               start the Cairn server and the dispatcher
-    triad down             stop them (data is kept)
-
-Then run an engagement. `engage` is the whole default flow: it creates the project,
-runs the Strix scan, then feeds the findings into the graph as hints and intents.
-
-    triad engage --title ACME --target https://app.example \
-                 --goal "conclude or rule out every finding in scope" \
-                 --roe contracts/roe-instructions.md
-    triad watch  --project proj_001
-    triad report --project proj_001 --workdir ~/engagements/acme -o report.md
-
-The steps are also usable on their own, which is what --no-scan and the individual
-commands are for when a scan is already running or was run elsewhere:
-
-    triad engage --no-scan ...                       # project only
-    triad scan   --target ... --workdir ...          # Strix only
-    triad findings --workdir ...                     # read a run
-    triad feed   --project proj_001 --workdir ...    # feed an existing run
-
-`triad up` runs the dispatcher as a host process, which is the path verified end
-to end here; the containerised dispatcher needs the amd64-only worker image, so
-local mode is the default on every architecture. `triad down` stops both.
+`triad --help` lists the rest. Local mode is the default, because the containerised
+dispatcher needs the amd64-only worker image: `triad up` runs the dispatcher on the host
+and `triad down` stops it and the server.
 """
 
 from __future__ import annotations
@@ -56,12 +32,12 @@ import urllib.request
 import uuid
 from pathlib import Path
 
-def _repo_root() -> Path:
-    """Locate the harness root.
 
-    Order: $TRIAD_HOME, then upward from this file. Deliberately does not look
-    under $HERMES_HOME: the normal flow is Strix -> Cairn and has no Hermes
-    dependency, so nothing here should require a Hermes install to exist.
+def _repo_root() -> Path:
+    """Locate the triad root: $TRIAD_HOME first, then upward from this file.
+
+    Deliberately not $HERMES_HOME: the normal flow is Strix -> Cairn, so nothing
+    here should require a Hermes install to exist.
     """
     env = os.environ.get("TRIAD_HOME")
     if env:
@@ -118,7 +94,6 @@ def _read_roe(path, *, max_chars=1800):
     return [f"[ROE] {text}"]
 
 
-
 def _slug(text, fallback="engagement"):
     """A filesystem-safe name for an engagement directory."""
     cleaned = re.sub(r"[^a-z0-9]+", "-", (text or "").lower()).strip("-")
@@ -134,30 +109,18 @@ def _engage_workdir(args):
     if getattr(args, "workdir", None):
         return Path(args.workdir).expanduser().resolve()
     base = (os.environ.get("TRIAD_WORKDIR") or _env_read().get("TRIAD_WORKDIR")
-            or "~/engagements")
+            or strix.DEFAULT_WORKDIR)
     return (Path(base).expanduser() / _slug(getattr(args, "title", ""))).resolve()
 
 
-def _strix_available():
-    if shutil.which("strix"):
-        return True
-    return (Path.home() / ".strix" / "bin" / "strix").exists()
-
-
 def _feed_run(c, project, workdir, run_id=None, anchor="origin"):
-    """Post one Strix run into the graph.
+    """Read a run and post its leads. Returns (run, hint_ids, intent_ids).
 
-    A hint per finding, an intent per actionable finding, all anchored on the
-    origin fact. This is the handoff the whole tool exists for: without it the
-    graph has nothing to search and the scan is just JSON on disk.
+    The handoff the whole tool exists for: without it the graph has nothing to search.
+    The posting itself lives in the plugin, shared with the Hermes front end.
     """
     run = strix.read_run(Path(workdir).expanduser(), run_id)
-    hints, intents = strix.to_cairn_leads(run)
-    posted_hints, posted_intents = [], []
-    for h in hints:
-        posted_hints.append(c.add_hint(project, f"[strix] {h}", "hermes.strix").get("id"))
-    for d in intents:
-        posted_intents.append(c.add_intent(project, [anchor], d, "hermes.strix").get("id"))
+    posted_hints, posted_intents = strix.post_leads(c, project, run, anchor)
     return run, posted_hints, posted_intents
 
 
@@ -175,11 +138,8 @@ def cmd_engage(args):
 
     c = client()
 
-    # Cairn has to wait for the scan. The dispatcher would otherwise begin a
-    # bootstrap pass and claim intents the moment the project exists, on a graph
-    # holding none of Strix's input, which duplicates the scan and spends budget on
-    # the wrong work. Stop it before the project exists, not after: the window
-    # between create and scan is exactly when it would start.
+    # Cairn waits for the scan: the dispatcher would otherwise bootstrap the new project on a
+    # graph holding none of Strix's input. Stop it before creation, which is when it would act.
     held = False
     if not getattr(args, "no_scan", False) and not getattr(args, "no_pause", False):
         if _pid_alive(DISPATCH_PID) and _dispatcher_stop_now():
@@ -213,7 +173,7 @@ def cmd_engage(args):
             print(json.dumps(summary))
         return 0
 
-    if not _strix_available():
+    if not strix.available():
         _err("strix is not installed, so nothing can be fed into the graph")
         print("     ./install.sh installs it; the project above still exists")
         return 2
@@ -435,13 +395,8 @@ def cmd_report(args):
     return 0
 
 
-
-# env, stack control and the first-run wizard
-#
-# The pieces below turn the installer's "next steps" list into something the CLI
-# does itself: collect keys into .env, bring Cairn up, start the dispatcher and
-# report readiness. Runtime state lives in .triad/ (gitignored) so a broken run
-# can be inspected or deleted without touching anything else.
+# env, stack control and the first-run wizard: collect keys into .env, bring Cairn up, start
+# the dispatcher and report readiness. Runtime state lives in .triad/, which is gitignored.
 
 STATE_DIR = REPO / ".triad"
 SERVER_PID = STATE_DIR / "server.pid"
@@ -456,16 +411,8 @@ LOCAL_OVERRIDE = STATE_DIR / "dispatch.local.yaml"
 DEFAULT_BASE = "http://127.0.0.1:8000"
 WORKER_CLIS = ("opencode", "claude", "codex", "pi")
 
-# One provider drives both layers by default, so the wizard asks once. Each entry has
-# to answer for Strix, which makes a LiteLLM call, and for the Cairn worker, which is
-# the opencode CLI, and the two want different model id forms: LiteLLM prefixes the
-# provider, opencode has its own id for the same thing. That is why the model appears
-# twice per entry rather than once.
-#
-# prefixes are what turns a provider's own model id into each layer's id, and
-# models_url is where that provider publishes its list. Every url below was checked
-# against the live service: unauthenticated they answer 401, which is how a correct
-# route looks without a key (openrouter answers 200, its list is public).
+# One provider drives both layers, so the wizard asks once; both id forms come from the entry's
+# prefixes, and every models_url here was checked live (401 without a key is a correct route).
 PROVIDERS: list[dict] = [
     {
         "name": "OpenCode Go / Zen",
@@ -691,7 +638,9 @@ def _default_provider(current, side="strix"):
             return index
     return 1
 
+
 _BOLD, _GRN, _YEL, _RED, _RST = "\033[1m", "\033[32m", "\033[33m", "\033[31m", "\033[0m"
+
 
 class _Cancelled:
     """Sentinel returned by the prompts when the user bails out (Ctrl-C or EOF).
@@ -841,16 +790,12 @@ def _echo(text):
 
 
 def _read_line(question, secret=False) -> "str | _Cancelled":
-    """Prompt for one line, with our own line editing.
+    """Prompt for one line, editing it ourselves.
 
-    Deliberately not `input` or `getpass`: both depend on the terminal's line
-    discipline, which a parent process can leave switched off. In that state backspace
-    is not an edit, it is a byte, so the value arrives holding control characters and
-    the display shows ^H, while Ctrl-C does not interrupt. Reading the bytes ourselves
-    means one backspace press deletes one character whatever the terminal is set to,
-    and no control byte can become part of a key.
-
-    Returns the line, or CANCELLED when the user interrupts or the input ends.
+    Not `input` or `getpass`: they leave editing to the terminal's line discipline, which
+    a parent can leave switched off, so backspace arrives as a control byte inside the
+    value and Ctrl-C does not interrupt. Returns the line, or CANCELLED on interrupt, on
+    end of input, and on Ctrl-D at an empty prompt (Ctrl-D with text submits it).
     """
     prompt = f"  {question}: "
     fd, owned = _tty_fd()
@@ -878,11 +823,8 @@ def _read_line(question, secret=False) -> "str | _Cancelled":
 
     working = list(saved)
     working[6] = list(saved[6])                      # a shallow copy shares the cc list
-    # ISIG is cleared as well: with it on, Ctrl-C is turned into a signal by the
-    # driver and never reaches us as a byte. Signals depend on this process being in
-    # the terminal's foreground group, which is not guaranteed (it fails outright in
-    # a pty whose foreground group is someone else, and Ctrl-C then does nothing at
-    # all). Reading the byte and cancelling ourselves works either way.
+    # ISIG stays cleared: with it on, the driver turns Ctrl-C into a signal that only reaches this
+    # process when it is in the terminal's foreground group. Handling the byte works regardless.
     working[3] = saved[3] & ~(termios.ICANON | termios.ECHO | termios.ISIG)
     working[6][termios.VMIN] = 1
     working[6][termios.VTIME] = 0
@@ -1016,9 +958,8 @@ def _worker_cli():
     return None, None
 
 
-# Why Docker is unusable, so `triad up` can name the actual problem instead of
-# saying "Docker is not usable" and leaving the user to guess. Installed-but-broken
-# is the common case: the daemon is down, or the user is not in the docker group yet.
+# Why Docker is unusable, so `triad up` names the problem rather than reporting
+# that Docker is simply not usable: installed-but-broken is the common case.
 DOCKER_STATES = {
     "absent": ("Docker is not installed",
                "./install.sh installs it"),
@@ -1348,9 +1289,8 @@ def cmd_setup(args):
     chosen = None
     worker_target = None
     if interactive:
-        # One question, both layers. Asking separately meant two prompts, two keys and
-        # a worker left pointing at whatever the last menu said, which is how the two
-        # sides drift apart. `triad configure` is for when they should differ.
+        # One question, both layers: asked separately it was two prompts, two keys, and two sides free
+        # to disagree. `triad configure` covers the case where they should differ.
         chosen = _choose(
             "Which provider should Strix and the Cairn worker use?\n"
             "  (for a different model on either side, run:  triad configure)",
@@ -1385,9 +1325,8 @@ def cmd_setup(args):
             return _aborted()
         worker_target = _worker_model_id(chosen, raw)
         updates["STRIX_LLM"] = _strix_model_id(chosen, raw)
-        # An empty value rather than leaving it out: switching to a provider that needs
-        # no custom endpoint has to clear the previous one, or those requests would
-        # still be sent to the old base URL.
+        # Written empty rather than left out: a provider needing no custom endpoint has to clear the
+        # previous one, or requests keep going to the old base url.
         updates["LLM_API_BASE"] = chosen["base"] or ""
         updates["LLM_EXTRA_HEADERS"] = _strix_headers() if chosen["headers"] else ""
 
@@ -1410,7 +1349,7 @@ def cmd_setup(args):
             updates["LLM_EXTRA_HEADERS"] = _strix_headers() if chosen["headers"] else ""
 
     updates.setdefault("CAIRN_BASE_URL", current.get("CAIRN_BASE_URL") or DEFAULT_BASE)
-    updates.setdefault("TRIAD_WORKDIR", current.get("TRIAD_WORKDIR") or "~/engagements")
+    updates.setdefault("TRIAD_WORKDIR", current.get("TRIAD_WORKDIR") or strix.DEFAULT_WORKDIR)
     updates.setdefault("STRIX_TELEMETRY", current.get("STRIX_TELEMETRY") or "0")
 
     path = _env_write(updates)
@@ -1426,9 +1365,8 @@ def cmd_setup(args):
         if merged.get(name):
             _ok(f"Worker key       {name} {_mask(merged[name])}")
 
-    # The worker half of the same choice: which model the local dispatcher runs.
-    # An unattended run must not undo a deliberate choice: if the worker model was set
-    # by `triad configure`, leave it alone and say so.
+    # The worker half of the same choice. An unattended run must not undo a deliberate one: if
+    # `triad configure` set the worker model, leave it alone and say so.
     keep_worker = (not interactive) and LOCAL_OVERRIDE.is_file()
     if keep_worker:
         _ok(f"Worker model     {_read_worker_model()} (kept; set by triad configure)")
@@ -1463,18 +1401,10 @@ def cmd_setup(args):
     return 0
 
 
-def _provider_for_strix_model(model):
-    """Which provider entry a LiteLLM model id belongs to, if any."""
+def _provider_for_model(model, field="strix_llm"):
+    """Which provider entry a model id belongs to, if any."""
     for provider in PROVIDERS:
-        if provider["strix_llm"] == model:
-            return provider
-    return None
-
-
-def _provider_for_worker_model(model):
-    """Which provider entry an opencode model id belongs to, if any."""
-    for provider in PROVIDERS:
-        if provider["worker_model"] == model:
+        if provider[field] == model:
             return provider
     return None
 
@@ -1543,7 +1473,7 @@ def cmd_configure(args):
 
     if from_flags:
         if args.strix_model:
-            provider = _provider_for_strix_model(args.strix_model)
+            provider = _provider_for_model(args.strix_model)
             env_changes["STRIX_LLM"] = args.strix_model
             env_changes["LLM_API_BASE"] = (provider or {}).get("base") or ""
             env_changes["LLM_EXTRA_HEADERS"] = (
@@ -1564,7 +1494,7 @@ def cmd_configure(args):
             worker_model = args.worker_model
             # Infer the provider from the model when it is a known one, so the key
             # below lands in the right variable instead of a guessed one.
-            inferred = _provider_for_worker_model(worker_model)
+            inferred = _provider_for_model(worker_model, "worker_model")
             if inferred:
                 worker_key_var = inferred["key_var"]
         if args.worker_key:
@@ -1605,10 +1535,8 @@ def cmd_configure(args):
             env_changes["LLM_EXTRA_HEADERS"] = _strix_headers() if pick["headers"] else ""
             if key:
                 env_changes["LLM_API_KEY"] = key
-                # Record it under the provider's own variable as well, exactly as
-                # setup does: that is where the key belongs in .env, and without it a
-                # later run cannot tell that this provider is already configured (so
-                # it asks for the key again) and the worker cannot pick it up.
+                # Record the key under the provider's own variable as well, as setup does: that is where it
+                # belongs in .env, and without it a later run cannot tell the provider is already configured.
                 if pick["key_var"] != "LLM_API_KEY":
                     env_changes[pick["key_var"]] = key
                 for var in pick["also"]:
@@ -1674,7 +1602,7 @@ def cmd_models(args):
     current = _env_read()
     provider = _provider_named(args.provider) if args.provider else None
     if provider is None:
-        provider = (_provider_for_strix_model(current.get("STRIX_LLM") or "")
+        provider = (_provider_for_model(current.get("STRIX_LLM") or "")
                     or PROVIDER_CHOICES[_default_provider(current) - 1][1])
     key = current.get(provider["key_var"]) or current.get("LLM_API_KEY")
     ids, problem = _fetch_models(provider, key)
@@ -1682,7 +1610,7 @@ def cmd_models(args):
         _err(f"{provider['name']}: {problem}")
         if provider.get("auth") != "none" and not key:
             print(f"     no {provider['key_var']} in {_env_path().name} to list with")
-        print(f"     known providers: " + ", ".join(p["name"] for p in PROVIDERS))
+        print("     known providers: " + ", ".join(p["name"] for p in PROVIDERS))
         return 2
     matches = [i for i in ids if args.filter.lower() in i.lower()] if args.filter else ids
     _ok(f"{provider['name']}: {len(matches)} of {len(ids)} models")
