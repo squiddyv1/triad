@@ -5,9 +5,10 @@
 # The normal flow is Strix -> Cairn and needs no agent framework. Hermes is an
 # optional extra layer and is never installed unless you ask for it.
 #
-#   ./install.sh                 install Docker, Strix and Cairn (Hermes only if present)
+#   ./install.sh                 install uv, Docker, Strix and Cairn (Hermes only if present)
 #   ./install.sh --with-hermes   also install Hermes if it is missing
 #   ./install.sh --no-docker     never install Docker, only report it
+#   ./install.sh --no-uv         never install uv, only report it
 #   ./install.sh --detect-only   report what is present, install nothing
 #   ./install.sh --check         verify an existing install, change nothing
 #   ./install.sh --uninstall     remove the symlinks this script created
@@ -35,6 +36,8 @@ HERMES_INSTALL_URL="https://hermes-agent.nousresearch.com/install.sh"
 # here is env-only, so a corporate mirror can be dropped in.
 DOCKER_INSTALL_URL="${DOCKER_INSTALL_URL:-https://get.docker.com}"
 DOCKER_BIN="${DOCKER_BIN:-docker}"
+# Astral's own installer. Needs no root, lands in ~/.local/bin.
+UV_INSTALL_URL="${UV_INSTALL_URL:-https://astral.sh/uv/install.sh}"
 
 MODE="install"
 # Installing the missing layers is the default; --detect-only turns it off.
@@ -52,11 +55,13 @@ for arg in "$@"; do
                     INSTALL_METHOD="none" ;;
     --no-docker)
                     DOCKER_INSTALL_METHOD="none" ;;
+    --no-uv)
+                    UV_INSTALL_METHOD="none" ;;
     --with-hermes|--all)
                     WITH_HERMES=1 ;;
     --with-strix)
                     : ;;   # Strix is part of the normal flow and installs anyway
-    -h|--help)      sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help)      sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *)              echo "unknown option: $arg (try --help)" >&2; exit 2 ;;
   esac
 done
@@ -68,6 +73,16 @@ hdr()  { printf '\n\033[1m%s\033[0m\n' "$*"; }
 have() { command -v "$1" >/dev/null 2>&1; }
 strix_present()  { have strix  || [ -x "$HOME/.strix/bin/strix" ]; }
 hermes_present() { have hermes || [ -x "$HOME/.local/bin/hermes" ]; }
+uv_present()     { have uv || [ -x "$HOME/.local/bin/uv" ] || [ -x "$HOME/.hermes/bin/uv" ]; }
+# Resolve uv even when its directory is not on this shell's PATH yet, so messages
+# can name the real binary and version instead of an empty string.
+uv_bin_path() {
+  local c
+  for c in "$(command -v uv 2>/dev/null)" "$HOME/.local/bin/uv" "$HOME/.hermes/bin/uv"; do
+    if [ -n "$c" ] && [ -x "$c" ]; then printf '%s\n' "$c"; return 0; fi
+  done
+  return 1
+}
 # Default is `official`: each project's own installer, fetched to a temp file and
 # hashed rather than piped blindly. See README.md for the URLs and `pkg`.
 
@@ -363,6 +378,17 @@ ensure_docker() {
   return 0
 }
 
+ensure_uv() {
+  if uv_present; then
+    ok "uv already installed ($("$(uv_bin_path)" --version 2>/dev/null | head -1))"
+    return 0
+  fi
+  local rc=0
+  install_layer uv "$UV_INSTALL_URL" \
+                "${UV_INSTALL_METHOD:-$INSTALL_METHOD}" uv uv || rc=$?
+  return "$rc"   # must not be clobbered by the calls above
+}
+
 ensure_strix() {
   if strix_present; then ok "strix already installed"; return 0; fi
   local rc=0
@@ -423,9 +449,12 @@ else
   warn "docker not found; will install it (${DOCKER_INSTALL_METHOD:-$INSTALL_METHOD})"
 fi
 
-if have uv; then ok "uv $(uv --version 2>/dev/null | awk '{print $2}')"
-elif have pipx; then ok "pipx (no uv)"
-else warn "neither uv nor pipx; Cairn needs uv: https://docs.astral.sh/uv/getting-started/installation/"; fi
+if uv_present; then ok "uv $(uv --version 2>/dev/null | awk '{print $2}')"
+elif [ "$MODE" = "check" ] || [ "${UV_INSTALL_METHOD:-$INSTALL_METHOD}" = "none" ]; then
+  warn "uv not found; Cairn and 'triad up' need it: https://docs.astral.sh/uv/"
+else
+  warn "uv not found; will install it (${UV_INSTALL_METHOD:-$INSTALL_METHOD})"
+fi
 
 if [ "$MODE" = "check" ]; then
   refresh_path
@@ -467,6 +496,8 @@ if [ "$MODE" = "check" ]; then
   else warn "docker daemon not reachable (Strix needs it; Cairn local mode does not)"; fi
   if "$DOCKER_BIN" compose version >/dev/null 2>&1; then ok "docker compose v2 available"
   else warn "docker compose v2 missing (cairn-server needs it)"; fi
+  if uv_present; then ok "uv $(uv --version 2>/dev/null | awk '{print $2}')"
+  else err "uv missing (Cairn and 'triad up' need it); run ./install.sh"; FAIL=1; fi
   if [ -f "$TRIAD_HOME/.env" ]; then ok ".env present"; else warn ".env missing (copy .env.example and fill it in)"; fi
   if command -v python3 >/dev/null 2>&1 && "$BIN_DIR/triad" --help >/dev/null 2>&1; then
     ok "triad CLI runs"
@@ -479,7 +510,12 @@ fi
 
 [ "$FAIL" = 0 ] || { echo; err "fix the errors above, then re-run."; exit 1; }
 #
-# Docker first: Strix's sandbox and the Cairn server both need it, so leaving it
+# uv is Cairn's runner and what `triad up` starts the server and dispatcher with.
+# It is small and needs no root, so there is no reason to leave it missing.
+hdr "uv"
+ensure_uv || warn "uv is not available; Cairn and 'triad up' need it"
+#
+# Docker next: Strix's sandbox and the Cairn server both need it, so leaving it
 # until last would install layers that cannot run.
 hdr "Docker"
 ensure_docker || warn "docker is not usable; Strix will not run until it is"

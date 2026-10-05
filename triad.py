@@ -632,7 +632,7 @@ def _server_local_start():
     """No-Docker fallback: run the Cairn server as a host process."""
     uv = _uv_bin()
     if uv is None:
-        return None, "uv not found; install it (https://docs.astral.sh/uv/) or start Docker"
+        return None, "uv not found; ./install.sh installs it (or see https://docs.astral.sh/uv/)"
     project = _cairn_project()
     if project is None:
         return None, f"no Cairn checkout at {CAIRN_DIR}; run ./install.sh"
@@ -650,7 +650,7 @@ def _dispatcher_start(config):
     """
     uv = _uv_bin()
     if uv is None:
-        return None, "uv not found; install it (https://docs.astral.sh/uv/) or start Docker"
+        return None, "uv not found; ./install.sh installs it (or see https://docs.astral.sh/uv/)"
     project = _cairn_project()
     if project is None:
         return None, f"no Cairn checkout at {CAIRN_DIR}; run ./install.sh"
@@ -746,6 +746,16 @@ def cmd_up(args):
     _hdr("Starting the stack")
     if not CAIRN_DIR.is_dir():
         _err(f"no Cairn checkout at {CAIRN_DIR}; run ./install.sh first")
+        return 2
+
+    # Both routes need something: Docker for the server, uv for the host server
+    # and for the dispatcher either way. Say which is missing before trying.
+    docker_usable = _docker_ok() and _compose_cmd() is not None
+    if not _cairn_up() and not docker_usable and _uv_bin() is None:
+        _err("cannot start the stack: no usable Docker and no uv")
+        print("     ./install.sh installs both, then re-run: triad up")
+        print("     uv alone is enough (it runs Cairn as a host process):")
+        print("       curl -LsSf https://astral.sh/uv/install.sh | sh")
         return 2
 
     if _cairn_up():

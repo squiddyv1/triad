@@ -51,18 +51,20 @@ optional one only if you ask.
 
 | Layer | Default behaviour |
 |---|---|
+| **uv** (Cairn's runner, and what `triad up` starts things with) | install if missing |
 | **Docker** (daemon + compose v2) | install if missing; `--no-docker` to only report |
 | **Triad harness** (tool package, CLI, contracts) | install |
 | **Cairn** (`oritera/Cairn`, cloned + patched) | install |
 | **Strix** | install if missing (the flow needs it) |
 | **Hermes** (optional) | install only with `--with-hermes`; if already present, the plugin is linked |
 
-Docker and Strix are installed with **the exact commands their own docs publish**,
-so this follows the official route rather than inventing one. Hermes, when you ask
-for it, goes through its own installer the same way:
+Docker, uv and Strix are installed with **the exact commands their own docs
+publish**, so this follows the official route rather than inventing one. Hermes,
+when you ask for it, goes through its own installer the same way:
 
 ```
 Docker  curl -fsSL https://get.docker.com | sh                             -> dockerd + compose v2
+uv      curl -LsSf https://astral.sh/uv/install.sh | sh                    -> ~/.local/bin/uv
 Strix   curl -sSL https://strix.ai/install | bash                          -> ~/.strix/bin/strix
 Hermes  curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash -> ~/.hermes
 ```
@@ -75,31 +77,33 @@ directly when the installer is already root).
 What it does, in order:
 
 1. checks prerequisites and reports exactly what is missing;
-2. installs Docker if it is absent, starts the daemon, adds you to the `docker`
+2. installs uv if it is absent (Cairn's runner, and what `triad up` uses);
+3. installs Docker if it is absent, starts the daemon, adds you to the `docker`
    group and ensures the compose v2 plugin;
-3. installs Strix if it is absent (see the method knobs below);
-4. clones Cairn and applies `patches/0001-opencode-worker-backend.patch`
+4. installs Strix if it is absent (see the method knobs below);
+5. clones Cairn and applies `patches/0001-opencode-worker-backend.patch`
    (upstream Cairn is never vendored into this repo);
-5. creates `.env` from `.env.example` and the engagement directory;
-6. installs a `triad` wrapper into `~/.local/bin` so the CLI works from anywhere;
-7. only if Hermes is present, or `--with-hermes` was passed: symlinks `plugin/`
+6. creates `.env` from `.env.example` and the engagement directory;
+7. installs a `triad` wrapper into `~/.local/bin` so the CLI works from anywhere;
+8. only if Hermes is present, or `--with-hermes` was passed: symlinks `plugin/`
    into `$HERMES_HOME/plugins/triad` and validates it with `hermes plugins doctor`.
    Otherwise it reports that Hermes is absent and moves on, because the CLI drives
    the same package directly.
 
 ```bash
-./install.sh                 # install / repair Docker + Strix + Cairn; leave Hermes alone
+./install.sh                 # install / repair uv + Docker + Strix + Cairn; leave Hermes alone
 ./install.sh --with-hermes   # also install Hermes and wire the plugin
 ./install.sh --no-docker     # do not install Docker, only report whether it is there
+./install.sh --no-uv         # do not install uv, only report whether it is there
 ./install.sh --detect-only   # report what is present, install nothing
 ./install.sh --check         # verify install health, change nothing
 ./install.sh --uninstall     # remove the symlinks it created (leaves Strix/Hermes alone)
 ```
 
-`uv` is checked but never installed, since it has its own installer and Cairn
-documents it. Docker **is** installed when missing, because two layers cannot run
-without it; `--no-docker` (or `DOCKER_INSTALL_METHOD=none`) downgrades that to a
-report. Either way it is idempotent, and an existing Docker is never touched.
+`uv` and Docker are both installed when missing, because Cairn cannot run without
+either; `UV_INSTALL_METHOD=none` and `--no-docker` (or `DOCKER_INSTALL_METHOD=none`)
+downgrade either one to a report. Both are idempotent, and an existing install is
+never touched.
 
 Docker publishes packages for Debian, Ubuntu, Raspbian, Fedora, the RHEL family,
 SLES and openSUSE only. On a derivative (Kali, Parrot, Mint, Pop) the vendor script
@@ -139,7 +143,7 @@ Every path is overridable, so nothing is machine-specific:
 | Python | ≥ 3.9 for the CLI (the installer checks) |
 | Docker | installed if missing by default: the daemon is started and the invoking user is added to the `docker` group; `--no-docker` to only report it |
 | Strix | Docker running; `pipx install strix-agent` or `curl -sSL https://strix.ai/install \| bash`; an LLM key |
-| Cairn | `uv` (the installer checks) + Docker **and the `docker compose` v2 plugin** for container mode, **or** local mode reusing a host worker CLI |
+| Cairn | `uv` (installed if missing) + Docker **and the `docker compose` v2 plugin** for container mode, **or** local mode reusing a host worker CLI |
 | Hermes (optional) | a Hermes install, only for the control plane; `mcp<2` for the MCP bridge (`uv run --with 'mcp<2'`) |
 
 ---
