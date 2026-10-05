@@ -171,6 +171,17 @@ def cmd_engage(args):
         return 2
 
     c = client()
+
+    # Cairn has to wait for the scan. The dispatcher would otherwise begin a
+    # bootstrap pass and claim intents the moment the project exists, on a graph
+    # holding none of Strix's input, which duplicates the scan and spends budget on
+    # the wrong work. Stop it before the project exists, not after: the window
+    # between create and scan is exactly when it would start.
+    held = False
+    if not getattr(args, "no_scan", False) and not getattr(args, "no_pause", False):
+        if _pid_alive(DISPATCH_PID) and _dispatcher_stop_now():
+            held = True
+
     hints = _read_roe(args.roe) or []
     res = c.create_project(
         title=args.title,
@@ -184,6 +195,8 @@ def cmd_engage(args):
     print(f"  origin: {args.target}")
     print(f"  goal:   {args.goal}")
     print(f"  hints:  {len(hints)} from {args.roe or '(none)'}")
+    if held:
+        print("  cairn:  dispatcher stopped; it works the graph only after the feed")
 
     summary = {"project": pid, "target": args.target, "goal": args.goal,
                "workdir": None, "findings": 0, "coverage_gaps": 0,
@@ -212,6 +225,9 @@ def cmd_engage(args):
     run_dir = _wait_for_run(workdir, timeout=args.scan_timeout)
     if run_dir is None:
         _err("no Strix run directory appeared, so there is nothing to feed")
+        if held:
+            _warn("cairn stays paused, because nothing was fed to it")
+            print("     start it on the unfed graph with:  triad up")
         print(f"     check {launch['log']}, then:  triad feed --project {pid} --workdir {workdir}")
         return 1
 
@@ -230,9 +246,19 @@ def cmd_engage(args):
         _warn("that run had not finished; feeding it again later is safe (hints and")
         _warn("intents are additive, so re-run: triad feed --project ... --workdir ...)")
 
-    if _pid_alive(DISPATCH_PID) is None:
-        _warn("the dispatcher is not running, so the graph will not move")
-        print("     start it:  triad up")
+    # The findings are in the graph now, so Cairn can work it. Releasing it here is
+    # the second half of the sequencing, not an afterthought.
+    if getattr(args, "hold", False):
+        print("\ncairn:  left idle (--hold); start it when ready:  triad up")
+    elif _pid_alive(DISPATCH_PID):
+        _ok("cairn is working the fed graph (the dispatcher was already running)")
+    else:
+        dpid, problem = _dispatcher_start_checked(getattr(args, "config", None))
+        if problem:
+            _warn(f"cairn did not start: {problem}")
+            print("     start it yourself:  triad up")
+        else:
+            _ok(f"cairn started on the fed graph (dispatcher pid {dpid})")
 
     print("\nnext:")
     print(f"  triad watch  --project {pid}                 # follow the graph")
@@ -881,6 +907,31 @@ def _dispatcher_start(config):
     return _spawn(cmd, DISPATCH_LOG, DISPATCH_PID)
 
 
+def _dispatcher_stop_now():
+    """Stop the dispatcher if it is running; True when one was actually stopped."""
+    if _pid_alive(DISPATCH_PID) is None:
+        return False
+    return _stop_pid(DISPATCH_PID, "the dispatcher")
+
+
+def _dispatcher_start_checked(config=None):
+    """Start the dispatcher after the checks `triad up` makes. Returns (pid, problem).
+
+    The worker and credential checks matter more here than in `up`, because this runs
+    unattended at the end of a scan: a dispatcher with no working worker claims
+    intents and then fails them, which is worse than not starting.
+    """
+    pid = _pid_alive(DISPATCH_PID)
+    if pid:
+        return pid, None
+    worker, _where = _worker_cli()
+    if worker is None:
+        return None, "no worker CLI found (opencode, claude, codex or pi)"
+    if worker == "opencode" and not _opencode_credentials():
+        return None, "opencode has no credentials; run: triad auth"
+    return _dispatcher_start(config or "dispatch.local.yaml")
+
+
 def cmd_setup(args):
     """First run: collect keys into .env, then offer to start the stack."""
     _hdr("Triad setup")
@@ -1274,6 +1325,11 @@ def main(argv=None):
     e.add_argument("--anchor", default="origin", help="graph fact the findings hang off")
     e.add_argument("--no-scan", action="store_true",
                    help="only create the project; do not scan or feed")
+    e.add_argument("--no-pause", action="store_true",
+                   help="leave the dispatcher running while the scan runs (allows overlap)")
+    e.add_argument("--hold", action="store_true",
+                   help="do not start Cairn on the graph after feeding")
+    e.add_argument("--config", help="dispatcher config to start Cairn with (default dispatch.local.yaml)")
     e.add_argument("--watch", action="store_true", help="follow the graph once fed")
     e.add_argument("--watch-timeout", type=int, default=1800)
     e.add_argument("--interval", type=int, default=15)

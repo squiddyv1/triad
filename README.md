@@ -209,6 +209,13 @@ straight after feeding, `--mode`/`--max-turns` to size the scan, `--scan-timeout
 if a long scan needs longer than the default hour, and `--json` for a summary you
 can script against.
 
+Cairn does not work the graph while the scan is running. `engage` stops the
+dispatcher before it creates the project, and starts it again once the findings are
+in. Otherwise the dispatcher begins a bootstrap pass and claims intents the moment
+the project exists, on a graph holding none of Strix's input, which duplicates the
+scan and spends budget on the wrong work. `--no-pause` restores the overlap, and
+`--hold` leaves Cairn idle after the feed so you can look at the graph first.
+
 The steps stay available individually for when a scan is already running, was run
 elsewhere, or you want to re-feed after it finished (`--no-scan` on `engage` is the
 project-only path):
@@ -222,6 +229,10 @@ triad feed   --project proj_001 --workdir ~/engagements/acme
 
 Re-feeding a run is safe: hints and intents are additive, so a scan that was still
 running when you fed it can be fed again once it finishes.
+
+Sequencing note: with the dispatcher stopped, nothing in Cairn advances, bootstrap
+included, because the dispatcher is the only component that acts on a project. The
+server by itself is inert and safe to leave up.
 
 If Hermes is installed, the plugin exposes this same package as `cairn_*` and
 `strix_*` tools, so a chat session drives exactly these calls. That path is
