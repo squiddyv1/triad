@@ -159,14 +159,37 @@ Every path is overridable, so nothing is machine-specific:
 ## Run it
 
 ```bash
-triad setup      # wizard: API keys -> .env, then starts the stack
+triad setup      # wizard: one provider for both layers, then starts the stack
 ```
 
-`triad setup` asks which model Strix should drive and for the key, writes `.env`
-(mode 600, comments preserved), then starts the Cairn server, starts the
-dispatcher, waits for the Cairn API to answer and prints what to run next. Bare
-`triad` does the same on an unconfigured checkout, and otherwise reports where
-things stand. Each step is also available on its own:
+`triad setup` asks **one** question: which provider should Strix *and* the Cairn
+worker use. One key then covers both, so there is no second prompt and no way for
+the two layers to end up on different providers by accident. It writes `.env` (mode
+600, comments preserved), sets the worker's model in the dispatcher config, then
+offers to start the stack.
+
+When the two sides should differ, use `triad configure`:
+
+```bash
+triad configure              # wizard: pick a model for each side separately
+triad configure --show       # report both sides, change nothing
+triad configure --strix-model openrouter/z-ai/glm-5.3
+triad configure --worker-provider deepseek
+triad configure --worker-model openrouter/z-ai/glm-5.3 --worker-key ...   # scriptable
+```
+
+That is the case for a cheap model on the high-volume worker and a stronger one on
+Strix, or a worker on a subscription while Strix uses a billed API. Both menus
+preselect whatever each side is currently using, so pressing Enter keeps it.
+
+The worker's model lives in the dispatcher config, not in `.env`, and `configure`
+writes it to `.triad/dispatch.local.yaml` (gitignored) with `dispatch.local.yaml`
+as the untouched template. `triad up` and `triad engage` prefer that generated file
+when it exists, so a chosen worker model never shows up as a local change in git
+and never conflicts on a pull.
+
+Bare `triad` does the same as `setup` on an unconfigured checkout, and otherwise
+reports where things stand. Each step is also available on its own:
 
 ```bash
 triad up         # start the Cairn server and the dispatcher

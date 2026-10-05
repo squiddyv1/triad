@@ -8,7 +8,8 @@ tools, so the engagement loop can equally run from a chat session.
 Start here:
 
     triad                  where things stand; offers setup on a fresh checkout
-    triad setup            prompts for API keys, writes .env, offers to start
+    triad setup            one provider for Strix and the worker: keys, then start
+    triad configure        give Strix and the worker different providers or models
     triad auth             write the worker CLI's credentials from .env
     triad up               start the Cairn server and the dispatcher
     triad down             stop them (data is kept)
@@ -51,6 +52,7 @@ import time
 import types
 import urllib.error
 import urllib.request
+import uuid
 from pathlib import Path
 
 def _repo_root() -> Path:
@@ -446,32 +448,113 @@ DISPATCH_PID = STATE_DIR / "dispatcher.pid"
 SERVER_LOG = STATE_DIR / "server.log"
 DISPATCH_LOG = STATE_DIR / "dispatcher.log"
 CAIRN_DIR = REPO / "cairn"
+# The shipped dispatcher config is the template; the machine-specific one is written
+# into .triad/ so a chosen worker model never modifies a tracked file.
+LOCAL_TEMPLATE = REPO / "dispatch.local.yaml"
+LOCAL_OVERRIDE = STATE_DIR / "dispatch.local.yaml"
 DEFAULT_BASE = "http://127.0.0.1:8000"
 WORKER_CLIS = ("opencode", "claude", "codex", "pi")
 
-# LiteLLM accepts provider/model, so the wizard offers the common ones and a free
-# text escape hatch. The first entry is this repo's documented default.
-MODEL_CHOICES = [
-    ("OpenRouter  openrouter/z-ai/glm-5.3  (this repo's default)", "openrouter/z-ai/glm-5.3"),
-    ("DeepSeek    deepseek/deepseek-chat", "deepseek/deepseek-chat"),
-    ("Anthropic   anthropic/claude-sonnet-4-5", "anthropic/claude-sonnet-4-5"),
-    ("Other       type any provider/model id", "__other__"),
+# One provider drives both layers by default, so the wizard asks once. Each entry has
+# to answer for Strix, which makes a LiteLLM call, and for the Cairn worker, which is
+# the opencode CLI, and the two want different model id forms: LiteLLM prefixes the
+# provider, opencode has its own id for the same thing. That is why the model appears
+# twice per entry rather than once.
+PROVIDERS: list[dict] = [
+    {
+        "name": "OpenCode Go / Zen",
+        "strix_llm": "openai/deepseek-v4.1-flash",
+        "base": "https://opencode.ai/zen/go/v1",
+        "headers": True,                 # this endpoint rejects a bare client
+        "worker_model": "opencode-go/deepseek-v4.1-flash",
+        "key_var": "OPENCODE_GO_API_KEY",
+        "also": [],
+    },
+    {
+        "name": "OpenRouter",
+        "strix_llm": "openrouter/z-ai/glm-5.3",
+        "base": None,
+        "headers": False,
+        "worker_model": "openrouter/z-ai/glm-5.3",
+        "key_var": "OPENROUTER_API_KEY",
+        "also": [],
+    },
+    {
+        "name": "DeepSeek",
+        "strix_llm": "deepseek/deepseek-chat",
+        "base": None,
+        "headers": False,
+        "worker_model": "deepseek/deepseek-chat",
+        "key_var": "DEEPSEEK_API_KEY",
+        "also": [],
+    },
+    {
+        "name": "Anthropic",
+        "strix_llm": "anthropic/claude-sonnet-4-5",
+        "base": None,
+        "headers": False,
+        "worker_model": "anthropic/claude-sonnet-4-5",
+        "key_var": "ANTHROPIC_API_KEY",
+        "also": ["ANTHROPIC_AUTH_TOKEN"],   # the container workers read this one
+    },
 ]
-# The bundled worker is opencode, so opencode's own providers come first: those get
-# written into its credentials file. The rest are read only by the containerised
-# workers in dispatch.yaml.
-WORKER_KEY_CHOICES = [
-    ("OpenCode Go / Zen -> OPENCODE_GO_API_KEY    (drives the bundled worker)", "OPENCODE_GO_API_KEY"),
-    ("OpenRouter        -> OPENROUTER_API_KEY     (also usable by the worker)", "OPENROUTER_API_KEY"),
-    ("skip               (add keys to .env yourself later)", None),
-    ("DeepSeek          -> DEEPSEEK_API_KEY    (container workers only)", "DEEPSEEK_API_KEY"),
-    ("Anthropic         -> ANTHROPIC_AUTH_TOKEN (container workers only)", "ANTHROPIC_AUTH_TOKEN"),
-    ("OpenAI            -> OPENAI_API_KEY     (container workers only)", "OPENAI_API_KEY"),
+PROVIDER_CHOICES: list[tuple[str, dict]] = [
+    ("OpenCode Go / Zen  opencode-go/deepseek-v4.1-flash   (subscription: one key for both)",
+     PROVIDERS[0]),
+    ("OpenRouter         openrouter/z-ai/glm-5.3           (billed per token)",
+     PROVIDERS[1]),
+    ("DeepSeek           deepseek/deepseek-chat", PROVIDERS[2]),
+    ("Anthropic          anthropic/claude-sonnet-4-5", PROVIDERS[3]),
 ]
-BIND_CHOICES = [
+KEEP = "__keep__"
+OTHER = "__other__"
+BIND_CHOICES: list[tuple[str, str]] = [
     ("127.0.0.1  loopback only (safer)", "127.0.0.1"),
     ("0.0.0.0    reachable from the LAN (convenient, note the exposure)", "0.0.0.0"),
 ]
+
+
+def _strix_headers():
+    """The LLM_EXTRA_HEADERS that an endpoint refusing a bare client needs.
+
+    The OpenCode Go endpoint answers 403 (Cloudflare error 1010) to the stock
+    python-urllib User-Agent and 400 MissingSessionID without a session header, so
+    both are required. Any non-default User-Agent is accepted, which is why none is
+    pinned to a version here.
+    """
+    return json.dumps({"User-Agent": "strix-agent",
+                       "x-opencode-session": f"triad-{uuid.uuid4()}"})
+
+
+def _provider_named(name):
+    """Look a provider up by name or key variable, case-insensitively, for the flags."""
+    wanted = (name or "").strip().lower()
+    for provider in PROVIDERS:
+        if wanted in (provider["name"].lower(), provider["key_var"].lower()):
+            return provider
+    return None
+
+
+def _default_provider(current, side="strix"):
+    """Which menu entry to preselect for one side of the config.
+
+    Whatever is already in use wins, so pressing Enter keeps it: for Strix that is the
+    model in .env, for the worker the model the dispatcher config runs. Failing that, a
+    provider the user already has a key for, since preselecting one they cannot use
+    costs them a round trip.
+    """
+    if side == "worker":
+        in_use, field = _read_worker_model(), "worker_model"
+    else:
+        in_use, field = current.get("STRIX_LLM"), "strix_llm"
+    if in_use:
+        for index, (_label, provider) in enumerate(PROVIDER_CHOICES, 1):
+            if provider[field] == in_use:
+                return index
+    for index, (_label, provider) in enumerate(PROVIDER_CHOICES, 1):
+        if current.get(provider["key_var"]):
+            return index
+    return 1
 
 _BOLD, _GRN, _YEL, _RED, _RST = "\033[1m", "\033[32m", "\033[33m", "\033[31m", "\033[0m"
 
@@ -1037,6 +1120,58 @@ def _dispatcher_start(config):
     return _spawn(cmd, DISPATCH_LOG, DISPATCH_PID)
 
 
+def _dispatcher_config_path(explicit=None):
+    """Which dispatcher config to run: explicit > machine-specific > shipped template.
+
+    Machine-specific settings live under .triad/ (gitignored) so that choosing a
+    worker model never leaves a tracked file modified, which would show up as a local
+    change and conflict on the next pull.
+    """
+    if explicit:
+        return str(explicit)
+    if LOCAL_OVERRIDE.is_file():
+        return str(LOCAL_OVERRIDE)
+    return "dispatch.local.yaml"
+
+
+def _write_worker_model(model):
+    """Set the local worker's model in the machine-specific dispatcher config.
+
+    Substituted into the shipped template rather than emitted from a copy in code, so
+    the template's comments and settings stay the one place they are maintained.
+    Returns (path, None) or (None, why it could not be written).
+    """
+    if not LOCAL_TEMPLATE.is_file():
+        return None, f"no dispatcher template at {LOCAL_TEMPLATE}"
+    text = LOCAL_TEMPLATE.read_text(encoding="utf-8")
+    updated, count = re.subn(r'(?m)^(\s*OPENCODE_MODEL:\s*).*$',
+                             lambda match: f'{match.group(1)}"{model}"', text)
+    if not count:
+        return None, "the shipped dispatch.local.yaml has no OPENCODE_MODEL line to set"
+    header = (
+        "# Generated by 'triad configure' from dispatch.local.yaml, which is the\n"
+        "# template. Machine-specific worker settings live here so the tracked file\n"
+        "# stays clean; .triad/ is gitignored, so this never conflicts on a pull.\n"
+        "# Change it with:  triad configure\n\n"
+    )
+    LOCAL_OVERRIDE.parent.mkdir(parents=True, exist_ok=True)
+    LOCAL_OVERRIDE.write_text(header + updated, encoding="utf-8")
+    return str(LOCAL_OVERRIDE), None
+
+
+def _read_worker_model():
+    """The worker model in whichever dispatcher config would actually run."""
+    path = Path(_dispatcher_config_path())
+    if not path.is_absolute():
+        path = REPO / path
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    found = re.search(r'(?m)^\s*OPENCODE_MODEL:\s*"?([^"\n]+?)"?\s*$', text)
+    return found.group(1) if found else None
+
+
 def _dispatcher_stop_now():
     """Stop the dispatcher if it is running; True when one was actually stopped."""
     if _pid_alive(DISPATCH_PID) is None:
@@ -1059,7 +1194,7 @@ def _dispatcher_start_checked(config=None):
         return None, "no worker CLI found (opencode, claude, codex or pi)"
     if worker == "opencode" and not _opencode_credentials():
         return None, "opencode has no credentials; run: triad auth"
-    return _dispatcher_start(config or "dispatch.local.yaml")
+    return _dispatcher_start(config or _dispatcher_config_path())
 
 
 def cmd_setup(args):
@@ -1075,36 +1210,43 @@ def cmd_setup(args):
         _warn("stdin is not a terminal, so defaults are used and nothing is prompted")
 
     updates = {}
+    chosen = None
     if interactive:
-        model = _choose("Which model should Strix drive?", MODEL_CHOICES, default=1)
-        if isinstance(model, _Cancelled):
+        # One question, both layers. Asking separately meant two prompts, two keys and
+        # a worker left pointing at whatever the last menu said, which is how the two
+        # sides drift apart. `triad configure` is for when they should differ.
+        chosen = _choose(
+            "Which provider should Strix and the Cairn worker use?\n"
+            "  (for a different model on either side, run:  triad configure)",
+            PROVIDER_CHOICES, default=_default_provider(current))
+        if isinstance(chosen, _Cancelled):
             return _aborted()
-        if model == "__other__":
-            model = _ask("  Model id (LiteLLM form, e.g. openrouter/z-ai/glm-5.3)")
-            if isinstance(model, _Cancelled):
-                return _aborted()
-        if model:
-            updates["STRIX_LLM"] = model
 
-        key = _ask_secret("API key for that provider (LLM_API_KEY, hidden)")
+        # The same key serves both sides for these providers, so ask once. An existing
+        # key is offered as the default so re-running setup does not demand it again.
+        existing = current.get(chosen["key_var"]) or current.get("LLM_API_KEY")
+        hint = f" [keep {_mask(existing)}]" if existing else ""
+        key = _ask_secret(f"API key for {chosen['name']}{hint}")
         if isinstance(key, _Cancelled):
             return _aborted()
+        if not key and existing:
+            key = existing
+            _ok(f"keeping the key already in {_env_path().name}")
+        elif not key:
+            _warn(f"no key entered; Strix and the worker will fail until "
+                  f"{chosen['key_var']} is set")
+
         if key:
             updates["LLM_API_KEY"] = key
-        elif not current.get("LLM_API_KEY"):
-            _warn("no key entered; Strix scans will fail until LLM_API_KEY is set")
-
-        # Only the container dispatcher needs these: in local mode the workers
-        # reuse whatever the host worker CLI is already logged into.
-        worker_key = _choose("Worker LLM key for the Cairn dispatcher?", WORKER_KEY_CHOICES, default=1)
-        if isinstance(worker_key, _Cancelled):
-            return _aborted()
-        if worker_key:
-            value = _ask_secret(f"{worker_key} (hidden)")
-            if isinstance(value, _Cancelled):
-                return _aborted()
-            if value:
-                updates[worker_key] = value
+            updates[chosen["key_var"]] = key
+            for var in chosen["also"]:
+                updates[var] = key
+        updates["STRIX_LLM"] = chosen["strix_llm"]
+        # An empty value rather than leaving it out: switching to a provider that needs
+        # no custom endpoint has to clear the previous one, or those requests would
+        # still be sent to the old base URL.
+        updates["LLM_API_BASE"] = chosen["base"] or ""
+        updates["LLM_EXTRA_HEADERS"] = _strix_headers() if chosen["headers"] else ""
 
         bind = _choose("Where should the Cairn API and console bind?", BIND_CHOICES, default=1)
         if isinstance(bind, _Cancelled):
@@ -1112,7 +1254,16 @@ def cmd_setup(args):
         if bind:
             updates["CAIRN_BIND"] = bind
     else:
-        updates["STRIX_LLM"] = current.get("STRIX_LLM") or MODEL_CHOICES[0][1]
+        fallback = PROVIDER_CHOICES[_default_provider(current) - 1][1]
+        chosen = fallback
+        if current.get("STRIX_LLM"):
+            updates["STRIX_LLM"] = current["STRIX_LLM"]
+        else:
+            # Take the whole provider, not just its model id: an openai/ model without
+            # its endpoint (and the headers that endpoint wants) does not work.
+            updates["STRIX_LLM"] = chosen["strix_llm"]
+            updates["LLM_API_BASE"] = chosen["base"] or ""
+            updates["LLM_EXTRA_HEADERS"] = _strix_headers() if chosen["headers"] else ""
 
     updates.setdefault("CAIRN_BASE_URL", current.get("CAIRN_BASE_URL") or DEFAULT_BASE)
     updates.setdefault("TRIAD_WORKDIR", current.get("TRIAD_WORKDIR") or "~/engagements")
@@ -1122,29 +1273,243 @@ def cmd_setup(args):
     _hdr("Written")
     _ok(f"{path} (mode 600)")
     merged = _env_read()
-    _ok(f"STRIX_LLM        {merged.get('STRIX_LLM') or '(unset)'}")
-    _ok(f"LLM_API_KEY      {_mask(merged.get('LLM_API_KEY'))}")
-    for name in ("ANTHROPIC_AUTH_TOKEN", "DEEPSEEK_API_KEY", "OPENAI_API_KEY"):
+    _ok(f"Strix model      {merged.get('STRIX_LLM') or '(unset)'}")
+    if merged.get("LLM_API_BASE"):
+        _ok(f"Strix endpoint   {merged['LLM_API_BASE']}")
+    _ok(f"Strix key        {_mask(merged.get('LLM_API_KEY'))}")
+    for name in ("OPENCODE_GO_API_KEY", "OPENROUTER_API_KEY", "DEEPSEEK_API_KEY",
+                 "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "OPENAI_API_KEY"):
         if merged.get(name):
-            _ok(f"{name:16} {_mask(merged[name])}")
-    _ok(f"CAIRN_BIND       {merged.get('CAIRN_BIND') or '(compose default)'}")
-    _ok(f"CAIRN_BASE_URL   {merged.get('CAIRN_BASE_URL')}")
+            _ok(f"Worker key       {name} {_mask(merged[name])}")
 
-    # opencode reads its own credentials file, so anything given above goes straight
-    # in. This is what makes a separate interactive `opencode auth login` unnecessary.
+    # The worker half of the same choice: which model the local dispatcher runs.
+    # An unattended run must not undo a deliberate choice: if the worker model was set
+    # by `triad configure`, leave it alone and say so.
+    keep_worker = (not interactive) and LOCAL_OVERRIDE.is_file()
+    if keep_worker:
+        _ok(f"Worker model     {_read_worker_model()} (kept; set by triad configure)")
+    else:
+        model_path, problem = _write_worker_model(chosen["worker_model"])
+        if problem:
+            _warn(f"worker model not set: {problem}")
+            _warn("the dispatcher will use whatever dispatch.local.yaml specifies")
+        else:
+            _ok(f"Worker model     {chosen['worker_model']}")
+
+    # opencode reads its own credentials file, so the key above goes straight in.
+    # This is what makes a separate interactive `opencode auth login` unnecessary.
     worker_entries = {provider: merged[var]
                       for var, provider in OPENCODE_AUTH_KEYS.items() if merged.get(var)}
     if worker_entries:
         auth_path = _opencode_auth_set(worker_entries)
         for provider in sorted(worker_entries):
-            _ok(f"opencode credentials: {provider} -> {auth_path}")
+            _ok(f"Worker creds     {provider} -> {auth_path}")
+    _ok(f"Cairn bind       {merged.get('CAIRN_BIND') or '(compose default)'}")
 
     if interactive:
+        print("\n  Both layers use the provider above. For a different provider or model")
+        print("  on either side, including a cheap worker and a stronger Strix model:")
+        print("    triad configure")
+        print()
         answer = _ask("Start Cairn and the dispatcher now? (Y/n)", "y")
         if isinstance(answer, _Cancelled):
             return _aborted()
         if answer.lower() not in ("n", "no"):
             return cmd_up(args)
+    return 0
+
+
+def _provider_for_strix_model(model):
+    """Which provider entry a LiteLLM model id belongs to, if any."""
+    for provider in PROVIDERS:
+        if provider["strix_llm"] == model:
+            return provider
+    return None
+
+
+def _provider_for_worker_model(model):
+    """Which provider entry an opencode model id belongs to, if any."""
+    for provider in PROVIDERS:
+        if provider["worker_model"] == model:
+            return provider
+    return None
+
+
+def _opencode_auth_for(key_var):
+    """The opencode provider a key variable is written to, if it is one opencode reads."""
+    return OPENCODE_AUTH_KEYS.get(key_var)
+
+
+def _configure_show(current):
+    """Report what each layer is set to, changing nothing."""
+    _ok(f"Strix (discovery)      {current.get('STRIX_LLM') or '(unset)'}")
+    if current.get("LLM_API_BASE"):
+        _ok(f"                       endpoint {current['LLM_API_BASE']}")
+    if current.get("LLM_EXTRA_HEADERS"):
+        _ok("                       custom headers set (required by that endpoint)")
+    _ok(f"                       key {_mask(current.get('LLM_API_KEY'))}")
+    _ok(f"Worker (exploitation)  {_read_worker_model() or '(unset)'}")
+    _ok(f"                       config {_dispatcher_config_path()}")
+    for var, provider in OPENCODE_AUTH_KEYS.items():
+        if current.get(var):
+            _ok(f"                       key {var} {_mask(current[var])} -> {provider}")
+    for var in ("DEEPSEEK_API_KEY", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN",
+                "OPENAI_API_KEY"):
+        if current.get(var):
+            _ok(f"                       key {var} {_mask(current[var])}")
+    return 0
+
+
+def cmd_configure(args):
+    """Give Strix and the Cairn worker their own provider and model.
+
+    `triad setup` picks one provider for both, which is what most installs want. This
+    is the escape hatch for when they should differ: a cheap model on the high-volume
+    worker and a stronger one on Strix, or a worker on a subscription while Strix uses
+    a billed API.
+    """
+    _hdr("Model providers")
+    current = _env_read()
+    if args.show:
+        return _configure_show(current)
+
+    env_changes, worker_model, worker_key = {}, None, None
+    worker_key_var = None
+    from_flags = bool(args.strix_model or args.strix_key or args.worker_provider
+                      or args.worker_model or args.worker_key)
+    if not from_flags and not sys.stdin.isatty():
+        _configure_show(current)
+        _warn("stdin is not a terminal and no flags were given, so nothing changed")
+        print("     set one side:  triad configure --strix-model openrouter/z-ai/glm-5.3")
+        return 0
+
+    given = {}                       # key var -> value, so one key is not asked twice
+
+    def key_for(var, name):
+        if var in given:
+            return given[var]
+        existing = current.get(var)
+        hint = f" [keep {_mask(existing)}]" if existing else ""
+        value = _ask_secret(f"API key for {name}{hint}")
+        if isinstance(value, _Cancelled):
+            return _Cancelled
+        value = value or existing or ""
+        given[var] = value
+        return value
+
+    if from_flags:
+        if args.strix_model:
+            provider = _provider_for_strix_model(args.strix_model)
+            env_changes["STRIX_LLM"] = args.strix_model
+            env_changes["LLM_API_BASE"] = (provider or {}).get("base") or ""
+            env_changes["LLM_EXTRA_HEADERS"] = (
+                _strix_headers() if (provider or {}).get("headers") else "")
+            if provider is None:
+                _warn(f"{args.strix_model} is not one of the known providers, so no")
+                _warn("endpoint is set; an openai/ model needs LLM_API_BASE as well")
+        if args.strix_key:
+            env_changes["LLM_API_KEY"] = _clean(args.strix_key)
+        if args.worker_provider:
+            provider = _provider_named(args.worker_provider)
+            if provider is None:
+                _err(f"unknown provider {args.worker_provider!r}")
+                print("     known: " + ", ".join(p["name"] for p in PROVIDERS))
+                return 2
+            worker_model, worker_key_var = provider["worker_model"], provider["key_var"]
+        if args.worker_model:
+            worker_model = args.worker_model
+            # Infer the provider from the model when it is a known one, so the key
+            # below lands in the right variable instead of a guessed one.
+            inferred = _provider_for_worker_model(worker_model)
+            if inferred:
+                worker_key_var = inferred["key_var"]
+        if args.worker_key:
+            worker_key = _clean(args.worker_key)
+            if not worker_key_var:
+                _err("a worker key needs to know which provider holds it")
+                print("     pass --worker-provider, or use a known model id so it can")
+                print("     be inferred:  " + ", ".join(p["worker_model"] for p in PROVIDERS))
+                return 2
+            env_changes[worker_key_var] = worker_key
+    else:
+        strix_choices = PROVIDER_CHOICES + [
+            ("Other: type a LiteLLM model id", OTHER),
+            ("Keep the current Strix model", KEEP),
+        ]
+        pick = _choose("Which model should Strix (discovery) drive?", strix_choices,
+                       default=_default_provider(current))
+        if isinstance(pick, _Cancelled):
+            return _aborted()
+        if pick is OTHER:
+            typed = _ask("Strix model id (LiteLLM form, e.g. openrouter/z-ai/glm-5.3)")
+            if isinstance(typed, _Cancelled):
+                return _aborted()
+            # An arbitrary id cannot imply an endpoint, so any previous one is cleared.
+            env_changes["STRIX_LLM"] = typed
+            env_changes["LLM_API_BASE"] = ""
+            env_changes["LLM_EXTRA_HEADERS"] = ""
+        elif pick is not KEEP:
+            env_changes["STRIX_LLM"] = pick["strix_llm"]
+            env_changes["LLM_API_BASE"] = pick["base"] or ""
+            env_changes["LLM_EXTRA_HEADERS"] = _strix_headers() if pick["headers"] else ""
+            key = key_for(pick["key_var"], pick["name"])
+            if isinstance(key, _Cancelled):
+                return _aborted()
+            if key:
+                env_changes["LLM_API_KEY"] = key
+                # Record it under the provider's own variable as well, exactly as
+                # setup does: that is where the key belongs in .env, and without it a
+                # later run cannot tell that this provider is already configured (so
+                # it asks for the key again) and the worker cannot pick it up.
+                if pick["key_var"] != "LLM_API_KEY":
+                    env_changes[pick["key_var"]] = key
+                for var in pick["also"]:
+                    env_changes[var] = key
+                # The same key usually drives the worker too, so hand it over rather
+                # than asking for it a second time.
+                given[pick["key_var"]] = key
+
+        worker_choices = PROVIDER_CHOICES + [
+            ("Other: type an opencode model id", OTHER),
+            ("Keep the current worker model", KEEP),
+        ]
+        wpick = _choose("Which model should the Cairn worker (exploitation) use?",
+                        worker_choices, default=_default_provider(current, "worker"))
+        if isinstance(wpick, _Cancelled):
+            return _aborted()
+        if wpick is OTHER:
+            typed = _ask("Worker model id (opencode form, e.g. openrouter/z-ai/glm-5.3)")
+            if isinstance(typed, _Cancelled):
+                return _aborted()
+            worker_model = typed
+        elif wpick is not KEEP:
+            worker_model = wpick["worker_model"]
+            key = key_for(wpick["key_var"], wpick["name"])
+            if isinstance(key, _Cancelled):
+                return _aborted()
+            if key:
+                env_changes[wpick["key_var"]] = key
+                worker_key_var, worker_key = wpick["key_var"], key
+
+    _hdr("Applied")
+    if env_changes:
+        env_path = _env_write(env_changes)
+        _ok(f"{env_path} (mode 600)")
+    if worker_model:
+        model_path, problem = _write_worker_model(worker_model)
+        if problem:
+            _err(problem)
+            return 2
+        _ok(f"worker model  {worker_model}")
+        _ok(f"              {model_path}")
+    if worker_key and _opencode_auth_for(worker_key_var):
+        auth = _opencode_auth_set({_opencode_auth_for(worker_key_var): worker_key})
+        _ok(f"worker creds  {_opencode_auth_for(worker_key_var)} -> {auth}")
+    if not (env_changes or worker_model):
+        _ok("nothing changed")
+    else:
+        _configure_show(_env_read())
+        print("\n  Restart for a worker change to take effect:  triad up")
     return 0
 
 
@@ -1238,7 +1603,7 @@ def cmd_up(args):
                 _warn("opencode has no credentials yet, so the worker will fail on its")
                 _warn("first model call. Put the key in its auth file with:")
                 print("       triad auth        (reads OPENCODE_GO_API_KEY from .env)")
-        config = getattr(args, "config", None) or "dispatch.local.yaml"
+        config = _dispatcher_config_path(getattr(args, "config", None))
         pid, problem = _dispatcher_start(config)
         if problem:
             _err(f"the dispatcher did not start: {problem}")
@@ -1433,6 +1798,16 @@ def main(argv=None):
     up.add_argument("--container", action="store_true",
                     help="use the compose dispatcher instead of the host one (amd64 only)")
     up.set_defaults(func=cmd_up)
+
+    cf = sub.add_parser("configure",
+                        help="set the provider and model for Strix and the Cairn worker")
+    cf.add_argument("--show", action="store_true", help="report both sides, change nothing")
+    cf.add_argument("--strix-model", help="LiteLLM model id for Strix")
+    cf.add_argument("--strix-key", help="API key for Strix's provider")
+    cf.add_argument("--worker-provider", help="provider name for the Cairn worker")
+    cf.add_argument("--worker-model", help="opencode model id for the Cairn worker")
+    cf.add_argument("--worker-key", help="API key for the worker's provider")
+    cf.set_defaults(func=cmd_configure)
 
     dn = sub.add_parser("down", help="stop the dispatcher and the Cairn server")
     dn.add_argument("--keep-server", action="store_true", help="stop only the dispatcher")
