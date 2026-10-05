@@ -10,6 +10,7 @@ Start here:
     triad                  where things stand; offers setup on a fresh checkout
     triad setup            one provider for Strix and the worker: keys, then start
     triad configure        give Strix and the worker different providers or models
+    triad models           list what a provider serves, so no id has to be guessed
     triad auth             write the worker CLI's credentials from .env
     triad up               start the Cairn server and the dispatcher
     triad down             stop them (data is kept)
@@ -460,6 +461,11 @@ WORKER_CLIS = ("opencode", "claude", "codex", "pi")
 # the opencode CLI, and the two want different model id forms: LiteLLM prefixes the
 # provider, opencode has its own id for the same thing. That is why the model appears
 # twice per entry rather than once.
+#
+# prefixes are what turns a provider's own model id into each layer's id, and
+# models_url is where that provider publishes its list. Every url below was checked
+# against the live service: unauthenticated they answer 401, which is how a correct
+# route looks without a key (openrouter answers 200, its list is public).
 PROVIDERS: list[dict] = [
     {
         "name": "OpenCode Go / Zen",
@@ -469,6 +475,10 @@ PROVIDERS: list[dict] = [
         "worker_model": "opencode-go/deepseek-v4.1-flash",
         "key_var": "OPENCODE_GO_API_KEY",
         "also": [],
+        "litellm_prefix": "openai",      # Strix reaches it as an OpenAI-compatible API
+        "opencode_prefix": "opencode-go",
+        "models_url": "https://opencode.ai/zen/go/v1/models",
+        "auth": "bearer",
     },
     {
         "name": "OpenRouter",
@@ -478,6 +488,9 @@ PROVIDERS: list[dict] = [
         "worker_model": "openrouter/z-ai/glm-5.3",
         "key_var": "OPENROUTER_API_KEY",
         "also": [],
+        "litellm_prefix": "openrouter",
+        "models_url": "https://openrouter.ai/api/v1/models",
+        "auth": "none",                  # its model list needs no key
     },
     {
         "name": "DeepSeek",
@@ -487,6 +500,9 @@ PROVIDERS: list[dict] = [
         "worker_model": "deepseek/deepseek-chat",
         "key_var": "DEEPSEEK_API_KEY",
         "also": [],
+        "litellm_prefix": "deepseek",
+        "models_url": "https://api.deepseek.com/models",
+        "auth": "bearer",
     },
     {
         "name": "Anthropic",
@@ -496,6 +512,9 @@ PROVIDERS: list[dict] = [
         "worker_model": "anthropic/claude-sonnet-4-5",
         "key_var": "ANTHROPIC_API_KEY",
         "also": ["ANTHROPIC_AUTH_TOKEN"],   # the container workers read this one
+        "litellm_prefix": "anthropic",
+        "models_url": "https://api.anthropic.com/v1/models",
+        "auth": "x-api-key",
     },
 ]
 PROVIDER_CHOICES: list[tuple[str, dict]] = [
@@ -512,6 +531,122 @@ BIND_CHOICES: list[tuple[str, str]] = [
     ("127.0.0.1  loopback only (safer)", "127.0.0.1"),
     ("0.0.0.0    reachable from the LAN (convenient, note the exposure)", "0.0.0.0"),
 ]
+
+
+LIST_MAX = 25      # models shown at once
+LIST_ALL = 40      # list at most this many without asking for a search term
+
+
+def _default_raw(provider):
+    """A provider's own id for its default model, with the layer prefixes removed.
+
+    Derived rather than stored a third time, so the two prefixed forms and this one
+    cannot drift apart.
+    """
+    model = provider["worker_model"]
+    prefix = provider.get("opencode_prefix") or provider["litellm_prefix"]
+    return model.split("/", 1)[1] if model.startswith(prefix + "/") else model
+
+
+def _strix_model_id(provider, raw):
+    """The LiteLLM id Strix needs for a model the provider calls `raw`."""
+    return f"{provider['litellm_prefix']}/{raw}"
+
+
+def _worker_model_id(provider, raw):
+    """The opencode id the Cairn worker needs for the same model."""
+    prefix = provider.get("opencode_prefix") or provider["litellm_prefix"]
+    return f"{prefix}/{raw}"
+
+
+def _fetch_models(provider, key=None, timeout=20):
+    """Ask a provider which models it serves. Returns (ids, problem).
+
+    Best effort on purpose: a wizard that cannot reach the provider still has to be
+    usable, so every failure comes back as a reason to fall back to typing an id and
+    never as an exception.
+    """
+    url = (provider or {}).get("models_url")
+    if not url:
+        return [], "this provider publishes no list"
+    headers = {"User-Agent": "triad"}
+    style = provider.get("auth", "bearer")
+    if style == "none":
+        pass
+    elif style == "x-api-key":
+        if not key:
+            return [], "a key is needed to list these models"
+        headers["x-api-key"] = key
+        headers["anthropic-version"] = "2023-06-01"
+    else:
+        if not key:
+            return [], "a key is needed to list these models"
+        headers["Authorization"] = f"Bearer {key}"
+    if provider.get("headers"):
+        # the endpoint that rejects a bare client for completions rejects it here too
+        headers["User-Agent"] = "strix-agent"
+        headers["x-opencode-session"] = f"triad-{uuid.uuid4()}"
+    try:
+        request = urllib.request.Request(url, headers=headers, method="GET")
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            payload = json.loads(response.read().decode("utf-8", "replace"))
+    except urllib.error.HTTPError as exc:
+        return [], f"HTTP {exc.code}"
+    except (urllib.error.URLError, OSError) as exc:
+        return [], f"could not reach it ({exc})"
+    except json.JSONDecodeError:
+        return [], "the reply was not JSON"
+    items = payload.get("data") if isinstance(payload, dict) else payload
+    if not isinstance(items, list):
+        return [], "the reply was not a model list"
+    ids = sorted({str(item.get("id") or item.get("name")) for item in items
+                  if isinstance(item, dict) and (item.get("id") or item.get("name"))})
+    return (ids, None) if ids else ([], "the list came back empty")
+
+
+def _pick_model(provider, key, side, default_raw=None):
+    """Let the user choose from what the provider actually serves.
+
+    Typing a model id from memory is how a scan dies on a model that does not exist;
+    the live list removes the guess. Falls back to a plain prompt when the list is
+    unavailable, so a network problem never blocks setup. Returns the provider's own
+    id, or CANCELLED.
+    """
+    default_raw = default_raw or _default_raw(provider)
+    ids, problem = _fetch_models(provider, key)
+    if problem:
+        _warn(f"cannot list {provider['name']} models: {problem}")
+        return _ask(f"{side} model id", default_raw)
+    _ok(f"{len(ids)} models available from {provider['name']}")
+    while True:
+        list_all = len(ids) <= LIST_ALL
+        hint = "blank lists them all" if list_all else f"blank keeps {default_raw}"
+        needle = _ask(f"Search the models ({hint})", "")
+        if isinstance(needle, _Cancelled):
+            return _Cancelled
+        if not needle and not list_all:
+            return default_raw
+        matches = [i for i in ids if needle.lower() in i.lower()] if needle else list(ids)
+        if not matches:
+            _warn(f"nothing matches {needle!r}")
+            continue
+        if default_raw in matches:          # so Enter keeps the sensible default
+            matches.remove(default_raw)
+            matches.insert(0, default_raw)
+        options = [(m, m) for m in matches[:LIST_MAX]]
+        options.append(("Type a model id myself", OTHER))
+        options.append((f"Keep {default_raw}", KEEP))
+        if len(matches) > LIST_MAX:
+            print(f"    ({len(matches)} matches; showing the first {LIST_MAX}, type "
+                  f"more of the name to narrow, or search again)")
+        pick = _choose(f"Which model should {side} use?", options, default=1)
+        if isinstance(pick, _Cancelled):
+            return _Cancelled
+        if pick is KEEP:
+            return default_raw
+        if pick is OTHER:
+            return _ask(f"{side} model id", default_raw)
+        return pick
 
 
 def _strix_headers():
@@ -1211,6 +1346,7 @@ def cmd_setup(args):
 
     updates = {}
     chosen = None
+    worker_target = None
     if interactive:
         # One question, both layers. Asking separately meant two prompts, two keys and
         # a worker left pointing at whatever the last menu said, which is how the two
@@ -1241,7 +1377,14 @@ def cmd_setup(args):
             updates[chosen["key_var"]] = key
             for var in chosen["also"]:
                 updates[var] = key
-        updates["STRIX_LLM"] = chosen["strix_llm"]
+
+        # With the key in hand, show what this provider actually serves instead of
+        # asking for a model id from memory. One choice still drives both layers.
+        raw = _pick_model(chosen, key, "Strix and the Cairn worker")
+        if isinstance(raw, _Cancelled):
+            return _aborted()
+        worker_target = _worker_model_id(chosen, raw)
+        updates["STRIX_LLM"] = _strix_model_id(chosen, raw)
         # An empty value rather than leaving it out: switching to a provider that needs
         # no custom endpoint has to clear the previous one, or those requests would
         # still be sent to the old base URL.
@@ -1256,6 +1399,7 @@ def cmd_setup(args):
     else:
         fallback = PROVIDER_CHOICES[_default_provider(current) - 1][1]
         chosen = fallback
+        worker_target = chosen["worker_model"]
         if current.get("STRIX_LLM"):
             updates["STRIX_LLM"] = current["STRIX_LLM"]
         else:
@@ -1289,12 +1433,12 @@ def cmd_setup(args):
     if keep_worker:
         _ok(f"Worker model     {_read_worker_model()} (kept; set by triad configure)")
     else:
-        model_path, problem = _write_worker_model(chosen["worker_model"])
+        model_path, problem = _write_worker_model(worker_target)
         if problem:
             _warn(f"worker model not set: {problem}")
             _warn("the dispatcher will use whatever dispatch.local.yaml specifies")
         else:
-            _ok(f"Worker model     {chosen['worker_model']}")
+            _ok(f"Worker model     {worker_target}")
 
     # opencode reads its own credentials file, so the key above goes straight in.
     # This is what makes a separate interactive `opencode auth login` unnecessary.
@@ -1432,7 +1576,7 @@ def cmd_configure(args):
                 return 2
             env_changes[worker_key_var] = worker_key
     else:
-        strix_choices = PROVIDER_CHOICES + [
+        strix_choices: list = PROVIDER_CHOICES + [
             ("Other: type a LiteLLM model id", OTHER),
             ("Keep the current Strix model", KEEP),
         ]
@@ -1449,12 +1593,16 @@ def cmd_configure(args):
             env_changes["LLM_API_BASE"] = ""
             env_changes["LLM_EXTRA_HEADERS"] = ""
         elif pick is not KEEP:
-            env_changes["STRIX_LLM"] = pick["strix_llm"]
-            env_changes["LLM_API_BASE"] = pick["base"] or ""
-            env_changes["LLM_EXTRA_HEADERS"] = _strix_headers() if pick["headers"] else ""
+            # Key first, because the model list is fetched with it.
             key = key_for(pick["key_var"], pick["name"])
             if isinstance(key, _Cancelled):
                 return _aborted()
+            raw = _pick_model(pick, key, "Strix (discovery)")
+            if isinstance(raw, _Cancelled):
+                return _aborted()
+            env_changes["STRIX_LLM"] = _strix_model_id(pick, raw)
+            env_changes["LLM_API_BASE"] = pick["base"] or ""
+            env_changes["LLM_EXTRA_HEADERS"] = _strix_headers() if pick["headers"] else ""
             if key:
                 env_changes["LLM_API_KEY"] = key
                 # Record it under the provider's own variable as well, exactly as
@@ -1469,7 +1617,7 @@ def cmd_configure(args):
                 # than asking for it a second time.
                 given[pick["key_var"]] = key
 
-        worker_choices = PROVIDER_CHOICES + [
+        worker_choices: list = PROVIDER_CHOICES + [
             ("Other: type an opencode model id", OTHER),
             ("Keep the current worker model", KEEP),
         ]
@@ -1483,10 +1631,13 @@ def cmd_configure(args):
                 return _aborted()
             worker_model = typed
         elif wpick is not KEEP:
-            worker_model = wpick["worker_model"]
             key = key_for(wpick["key_var"], wpick["name"])
             if isinstance(key, _Cancelled):
                 return _aborted()
+            raw = _pick_model(wpick, key, "the Cairn worker")
+            if isinstance(raw, _Cancelled):
+                return _aborted()
+            worker_model = _worker_model_id(wpick, raw)
             if key:
                 env_changes[wpick["key_var"]] = key
                 worker_key_var, worker_key = wpick["key_var"], key
@@ -1510,6 +1661,39 @@ def cmd_configure(args):
     else:
         _configure_show(_env_read())
         print("\n  Restart for a worker change to take effect:  triad up")
+    return 0
+
+
+def cmd_models(args):
+    """List the models a provider serves, so no model id has to be guessed.
+
+    The wizards show this list when they ask for a model; this is the same list from
+    the command line, for looking before configuring or for scripting.
+    """
+    _hdr("Available models")
+    current = _env_read()
+    provider = _provider_named(args.provider) if args.provider else None
+    if provider is None:
+        provider = (_provider_for_strix_model(current.get("STRIX_LLM") or "")
+                    or PROVIDER_CHOICES[_default_provider(current) - 1][1])
+    key = current.get(provider["key_var"]) or current.get("LLM_API_KEY")
+    ids, problem = _fetch_models(provider, key)
+    if problem:
+        _err(f"{provider['name']}: {problem}")
+        if provider.get("auth") != "none" and not key:
+            print(f"     no {provider['key_var']} in {_env_path().name} to list with")
+        print(f"     known providers: " + ", ".join(p["name"] for p in PROVIDERS))
+        return 2
+    matches = [i for i in ids if args.filter.lower() in i.lower()] if args.filter else ids
+    _ok(f"{provider['name']}: {len(matches)} of {len(ids)} models")
+    for model in matches[:args.limit]:
+        print(f"    {model}")
+    if len(matches) > args.limit:
+        print(f"    ... and {len(matches) - args.limit} more (--limit, or --filter)")
+    if matches:
+        print(f"\n  Strix uses  {_strix_model_id(provider, matches[0])}")
+        print(f"  the worker  {_worker_model_id(provider, matches[0])}")
+        print("  setup and configure write both forms for whichever model you pick")
     return 0
 
 
@@ -1798,6 +1982,12 @@ def main(argv=None):
     up.add_argument("--container", action="store_true",
                     help="use the compose dispatcher instead of the host one (amd64 only)")
     up.set_defaults(func=cmd_up)
+
+    mo = sub.add_parser("models", help="list the models a provider serves")
+    mo.add_argument("--provider", help="provider name (default: whatever Strix is set to)")
+    mo.add_argument("--filter", help="only ids containing this text")
+    mo.add_argument("--limit", type=int, default=30, help="how many to print (default 30)")
+    mo.set_defaults(func=cmd_models)
 
     cf = sub.add_parser("configure",
                         help="set the provider and model for Strix and the Cairn worker")
