@@ -2,16 +2,20 @@
 #
 # Triad installer — Strix (discovery) + Cairn (exploitation) + Hermes (control plane).
 #
-#   ./install.sh                 install the harness; detect the other layers
-#   ./install.sh --all           also install Strix and Hermes if missing
-#   ./install.sh --with-strix    also install Strix if missing
-#   ./install.sh --with-hermes   also install Hermes if missing
+#   ./install.sh                 install everything (all three layers)
+#   ./install.sh --detect-only   report what is present, install nothing
 #   ./install.sh --check         verify an existing install, change nothing
 #   ./install.sh --uninstall     remove the symlinks this script created
 #
-# Flags can be combined. By default nothing is installed except Cairn: Strix and
-# Hermes are detected and reported, so a machine that already runs them is never
-# touched. `--with-*` is the opt-in for a genuine one-shot bootstrap.
+# By default this installs whatever is missing. Strix and Hermes use the exact
+# commands their own repositories document, so this matches the official route:
+#   Strix   curl -sSL https://strix.ai/install | bash
+#   Hermes  curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
+# The scripts are downloaded to a temp file and hashed before they run (a
+# reported one-liner rather than a blind pipe) but it is the same installer.
+#
+# `--with-strix` / `--with-hermes` / `--all` are accepted for backwards
+# compatibility and are now no-ops, because installing is the default.
 #
 # Everything is configurable through environment variables:
 #   TRIAD_HOME    where the harness lives        (default: this script's directory)
@@ -19,6 +23,11 @@
 #   HERMES_HOME   the Hermes profile to extend   (default: $HERMES_HOME or ~/.hermes)
 #   BIN_DIR       where the `triad` CLI goes     (default: ~/.local/bin)
 #   ENGAGEMENTS   where engagements/runs live    (default: ~/engagements)
+#   TRIAD_INSTALL_METHOD  official|pkg|none      (default: official)
+#                         official = the vendor script above
+#                         pkg      = uv tool install / pipx, then fall back
+#                         none     = detect only, never install
+#   STRIX_INSTALL_METHOD / HERMES_INSTALL_METHOD   override per layer
 #
 # Nothing here is machine-specific: every path is derived or overridable, and the
 # script is idempotent — run it again to repair an install.
@@ -41,17 +50,18 @@ STRIX_INSTALL_URL="https://strix.ai/install"
 HERMES_INSTALL_URL="https://hermes-agent.nousresearch.com/install.sh"
 
 MODE="install"
-WITH_STRIX=0
-WITH_HERMES=0
+# Installing the missing layers is the default; --detect-only turns it off.
+INSTALL_METHOD="${TRIAD_INSTALL_METHOD:-official}"
 for arg in "$@"; do
   case "$arg" in
-    --check)       MODE="check" ;;
-    --uninstall)   MODE="uninstall" ;;
-    --with-strix)  WITH_STRIX=1 ;;
-    --with-hermes) WITH_HERMES=1 ;;
-    --all)         WITH_STRIX=1; WITH_HERMES=1 ;;
-    -h|--help)     sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
-    *)             echo "unknown option: $arg (try --help)" >&2; exit 2 ;;
+    --check)        MODE="check" ;;
+    --uninstall)    MODE="uninstall" ;;
+    --detect-only|--no-deps)
+                    INSTALL_METHOD="none" ;;
+    --with-strix|--with-hermes|--all)
+                    : ;;   # now the default; accepted for compatibility
+    -h|--help)      sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *)              echo "unknown option: $arg (try --help)" >&2; exit 2 ;;
   esac
 done
 
@@ -64,15 +74,33 @@ have() { command -v "$1" >/dev/null 2>&1; }
 # --------------------------------------------------------------------------- #
 # helpers: install a missing layer
 # --------------------------------------------------------------------------- #
-# Prefer a package manager (pinned, verifiable, uninstallable) over piping an
-# installer script into a shell. The script path is a last resort and is always
-# downloaded, sized, hashed and shown first — never a blind `curl | bash`.
+# Default method is `official`: run the installer each project documents on its
+# own repo page, so this path stays identical to the vendor's supported route.
+#   Strix   curl -sSL https://strix.ai/install | bash        -> ~/.strix/bin/strix
+#   Hermes  curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
 #
-# KNOWN TRADEOFF: PyPI can lag the vendor's own installer. `hermes-agent` on
-# PyPI is 0.19.0 while the official script tracks the current release (0.21.x).
-# Set HERMES_INSTALL_METHOD=script (or STRIX_INSTALL_METHOD=script) to follow the
-# vendor channel instead, or =pkg to force the package manager.
-INSTALL_METHOD="${TRIAD_INSTALL_METHOD:-pkg}"
+# The only deviation is that the script is fetched to a temp file, sized and
+# hashed, then executed — a reported one-liner instead of a blind pipe. Same
+# bytes, same installer, one line of evidence in the transcript.
+#
+# `pkg` uses the package manager instead (uv tool, else pipx). Note PyPI can lag
+# the vendor channel for Hermes (0.19.0 vs 0.21.x), which is why `official` is
+# the default. `none` skips installation entirely.
+
+# The vendor installers drop launchers in places this shell may not have on PATH
+# yet (they tell you to `source ~/.bashrc`). Pick them up immediately.
+refresh_path() {
+  local d
+  for d in "$HOME/.local/bin" "$HOME/.hermes/bin" "$HOME/.strix/bin"; do
+    [ -d "$d" ] || continue
+    case ":$PATH:" in
+      *":$d:"*) ;;
+      *) PATH="$d:$PATH" ;;
+    esac
+  done
+  export PATH
+  hash -r 2>/dev/null || true
+}
 
 pkg_install() {  # name-on-pypi
   local pkg="$1"
@@ -93,53 +121,70 @@ script_install() {  # url
   local url="$1" tmp
   tmp="$(mktemp -t triad-installer.XXXXXX.sh)"
   curl -fsSL "$url" -o "$tmp"
-  echo "    downloaded $url"
+  echo "    fetched $url"
   echo "    -> $tmp  ($(wc -c <"$tmp") bytes, sha256 $(sha256sum "$tmp" | cut -c1-32)…)"
-  echo "    running it now; review $tmp if you want to see what it did"
-  bash "$tmp"
+  bash "$tmp" || { err "the installer exited non-zero (script kept at $tmp)"; return 1; }
+  rm -f "$tmp"
 }
 
 # install_layer <pypi-name> <script-url> <method> <command-to-verify> <label>
 install_layer() {
   local pkg="$1" url="$2" method="$3" cmd="$4" label="$5"
   case "$method" in
-    script)
-      echo "  installing $label (vendor script)"
+    official)
+      echo "  installing $label using the command its repository documents"
       script_install "$url" || { err "$label install failed"; return 1; }
       ;;
     pkg)
-      echo "  installing $label (PyPI: $pkg)"
+      echo "  installing $label from a package manager (PyPI: $pkg)"
       if ! pkg_install "$pkg"; then
         warn "no package manager, or it failed — falling back to the vendor script"
         script_install "$url" || { err "$label install failed"; return 1; }
       fi
       ;;
-    *) err "unknown install method '$method' (use pkg or script)"; return 2 ;;
+    none)
+      warn "$label is missing and installation is disabled (TRIAD_INSTALL_METHOD=none)"
+      return 0
+      ;;
+    *) err "unknown install method '$method' (use official, pkg or none)"; return 2 ;;
   esac
-  hash -r 2>/dev/null || true
+  refresh_path
   if have "$cmd"; then
     ok "$label installed ($("$cmd" --version 2>/dev/null | head -1))"
-  elif [ -x "$HOME/.strix/bin/$cmd" ]; then
-    ok "$label installed ($HOME/.strix/bin/$cmd)"
   else
-    warn "$label installed, but '$cmd' is not on PATH yet — add ~/.local/bin to it"
+    warn "$label installed, but '$cmd' is not on PATH in this shell yet"
+    warn "  open a new shell, or: source ~/.bashrc"
   fi
 }
 
 ensure_strix() {
-  if have strix || [ -x "$HOME/.strix/bin/strix" ]; then ok "strix already present"; return 0; fi
+  if have strix || [ -x "$HOME/.strix/bin/strix" ]; then ok "strix already installed"; return 0; fi
+  local rc=0
   install_layer strix-agent "$STRIX_INSTALL_URL" \
-                "${STRIX_INSTALL_METHOD:-$INSTALL_METHOD}" strix Strix
-  echo "    note: Strix's sandbox image is pulled on first scan and needs Docker"
+                "${STRIX_INSTALL_METHOD:-$INSTALL_METHOD}" strix Strix || rc=$?
+  echo "    note: Strix needs Docker; its sandbox image is pulled on the first scan"
+  return "$rc"   # must not be clobbered by the echo above
 }
 
 ensure_hermes() {
-  if have hermes; then ok "hermes already present"; return 0; fi
-  install_layer hermes-agent "$HERMES_INSTALL_URL" \
-                "${HERMES_INSTALL_METHOD:-$INSTALL_METHOD}" hermes Hermes
-  if [ "${HERMES_INSTALL_METHOD:-$INSTALL_METHOD}" = "pkg" ]; then
-    warn "PyPI can lag the vendor channel — use HERMES_INSTALL_METHOD=script for the current release"
+  if have hermes || [ -x "$HOME/.local/bin/hermes" ]; then ok "hermes already installed"; return 0; fi
+  # The vendor installer unpacks Python, Node, npm, ripgrep and FFmpeg into
+  # $HERMES_HOME/tools and clones the agent — several GB. Check first so a run
+  # fails fast with a clear reason instead of halfway through a multi-GB download.
+  local need_mb=4096 avail_mb
+  avail_mb="$(df -Pm "$HOME" 2>/dev/null | awk 'NR==2{print $4}')"
+  if [ -n "${avail_mb:-}" ] && [ "$avail_mb" -lt "$need_mb" ]; then
+    err "Hermes needs roughly ${need_mb} MB free under $HOME; only ${avail_mb} MB available"
+    err "free some space, or install Hermes yourself: $HERMES_INSTALL_URL"
+    return 1
   fi
+  local rc=0
+  install_layer hermes-agent "$HERMES_INSTALL_URL" \
+                "${HERMES_INSTALL_METHOD:-$INSTALL_METHOD}" hermes Hermes || rc=$?
+  if [ "$rc" = 0 ]; then
+    warn "the Hermes installer may have prompted for sudo (Node/libatomic)"
+  fi
+  return "$rc"   # must not be clobbered by the warn above
 }
 
 # --------------------------------------------------------------------------- #
@@ -183,17 +228,17 @@ elif have pipx; then ok "pipx (no uv)"
 else warn "neither uv nor pipx — Cairn needs uv: https://docs.astral.sh/uv/getting-started/installation/"; fi
 
 if [ "$MODE" = "check" ]; then
-  have strix || [ -x "$HOME/.strix/bin/strix" ] && ok "strix present" || warn "strix not found"
-  have hermes && ok "hermes present" || warn "hermes not found"
-elif [ "$WITH_STRIX" = 1 ] || [ "$WITH_HERMES" = 1 ]; then
-  # fine — handled below, after the hard failures are cleared
-  :
-elif have strix || [ -x "$HOME/.strix/bin/strix" ]; then ok "strix present"
-else warn "strix not found — pass --with-strix to install it, or see README"; fi
-
-if [ "$MODE" != "check" ] && { [ "$WITH_STRIX" = 0 ] && [ "$WITH_HERMES" = 0 ]; }; then
+  refresh_path
+  if have strix || [ -x "$HOME/.strix/bin/strix" ]; then ok "strix present"; else warn "strix not found"; fi
+  if have hermes || [ -x "$HOME/.local/bin/hermes" ]; then ok "hermes present"; else warn "hermes not found"; fi
+else
+  # Reported here; installed a few lines below, once the hard failures clear.
+  if have strix || [ -x "$HOME/.strix/bin/strix" ]; then ok "strix present"
+  else warn "strix missing — will install it ($INSTALL_METHOD)"; fi
+  if have hermes || [ -x "$HOME/.local/bin/hermes" ]; then ok "hermes present"
+  else warn "hermes missing — will install it ($INSTALL_METHOD)"; fi
   if [ -d "$HERMES_HOME" ]; then ok "Hermes home: $HERMES_HOME"
-  else warn "no Hermes home at $HERMES_HOME — pass --with-hermes to install Hermes"; fi
+  elif [ "$INSTALL_METHOD" = "none" ]; then warn "no Hermes home at $HERMES_HOME — --detect-only, so nothing was installed"; fi
 fi
 
 if [ "$MODE" = "check" ]; then
@@ -221,14 +266,11 @@ fi
 [ "$FAIL" = 0 ] || { echo; err "fix the errors above, then re-run."; exit 1; }
 
 # --------------------------------------------------------------------------- #
-# optional layers: Strix, Hermes
+# Strix + Hermes: install whatever is missing
 # --------------------------------------------------------------------------- #
-if [ "$WITH_STRIX" = 1 ] || [ "$WITH_HERMES" = 1 ]; then
-  hdr "Optional layers"
-  [ "$WITH_STRIX" = 1 ]   && ensure_strix   || true
-  [ "$WITH_HERMES" = 1 ] && ensure_hermes || true
-  hash -r 2>/dev/null || true   # pick up anything newly installed on PATH
-fi
+hdr "Strix and Hermes"
+ensure_strix   || warn "Strix is not installed — the discovery layer will be unavailable"
+ensure_hermes  || warn "Hermes is not installed — the control plane will be unavailable"
 
 # --------------------------------------------------------------------------- #
 # Cairn checkout + backend patch

@@ -40,25 +40,32 @@ cd triad
 ./install.sh
 ```
 
-`install.sh` is idempotent. By default it installs this harness and Cairn, and
-**only detects** Strix and Hermes — a machine that already runs them is never
-touched. Pass a flag for a genuine one-shot bootstrap:
+`install.sh` is idempotent and installs **all three layers** — whatever is already
+present is left alone, whatever is missing is installed:
 
-| | default | `--with-strix` | `--with-hermes` | `--all` |
-|---|---|---|---|---|
-| **Triad harness** (plugin, CLI, contracts) | install | install | install | install |
-| **Cairn** (cloned + patched) | install | install | install | install |
-| **Strix** | detect only | install if missing | detect only | install if missing |
-| **Hermes** | detect only | detect only | install if missing | install if missing |
+| Layer | Default behaviour |
+|---|---|
+| **Triad harness** (plugin, CLI, contracts) | install |
+| **Cairn** (`oritera/Cairn`, cloned + patched) | install |
+| **Strix** | install if missing |
+| **Hermes** | install if missing |
+
+Strix and Hermes are installed with **the exact commands their own repositories
+document**, so this follows the official route rather than inventing one:
+
+```
+Strix   curl -sSL https://strix.ai/install | bash                          -> ~/.strix/bin/strix
+Hermes  curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash -> ~/.hermes
+```
+
+The only deviation is that the script is fetched to a temp file and its size and
+sha256 are printed before it runs — a reported one-liner instead of a blind pipe.
+Same bytes, same installer.
 
 What it does, in order:
 
 1. checks prerequisites and reports exactly what is missing;
-2. installs the optional layers you asked for — preferring the package manager
-   (`uv tool install strix-agent` / `hermes-agent`, else `pipx`) over piping an
-   installer into a shell; if neither exists it downloads the official script to
-   a temp file, prints its size and sha256, and runs *that*, never a blind
-   `curl | bash`;
+2. installs Strix and Hermes if they are absent (see the method knobs below);
 3. clones Cairn and applies `patches/0001-opencode-worker-backend.patch`
    (upstream Cairn is never vendored into this repo);
 4. creates `.env` from `.env.example` and the engagement directory;
@@ -67,28 +74,28 @@ What it does, in order:
 6. installs a `triad` wrapper into `~/.local/bin` so the CLI works from anywhere.
 
 ```bash
-./install.sh --all          # bootstrap everything missing, including the other two layers
-./install.sh --with-strix   # just Strix
-./install.sh --check        # report install health, change nothing
-./install.sh                # re-run to repair
-./install.sh --uninstall    # remove the symlinks it created (leaves Strix/Hermes alone)
+./install.sh                 # install / repair everything
+./install.sh --detect-only   # report what is present, install nothing
+./install.sh --check         # verify install health, change nothing
+./install.sh --uninstall     # remove the symlinks it created (leaves Strix/Hermes alone)
 ```
 
-Docker and `uv` are checked but never installed — both have their own
-installers and installing them silently is not this script's call.
+Docker and `uv` are checked but never installed — both have their own installers
+and installing them silently is not this script's call.
 
-Two knobs on how the optional layers are installed:
+### Install method
 
-- `TRIAD_INSTALL_METHOD=pkg|script` (default `pkg`) — `pkg` uses
-  `uv tool install` / `pipx`; `script` uses the vendor installer.
-- `STRIX_INSTALL_METHOD` / `HERMES_INSTALL_METHOD` override that per layer.
+| `TRIAD_INSTALL_METHOD` | Behaviour |
+|---|---|
+| `official` (default) | the vendor script from each project's README (above) |
+| `pkg` | `uv tool install strix-agent` / `hermes-agent`, else `pipx`, then fall back to the vendor script |
+| `none` | detect only, never install |
 
-`pkg` is the default because the result is pinned and uninstallable, but **PyPI
-can lag the vendor channel** — `hermes-agent` there is 0.19.0 while the official
-script tracks 0.21.x. Use `HERMES_INSTALL_METHOD=script` if you want the current
-release rather than the pinned one. Whichever path runs, nothing is piped
-straight into a shell: the script is downloaded to a temp file, and its size and
-sha256 are printed before it executes.
+`STRIX_INSTALL_METHOD` / `HERMES_INSTALL_METHOD` override it per layer. `official`
+is the default because it is the route both projects support and it tracks their
+current releases; `pkg` produces a pinned, uninstallable install but **PyPI lags
+the vendor channel** (`hermes-agent` there is 0.19.0 while the official script
+tracks 0.21.x), so prefer `official` unless you specifically want the pinned one.
 
 Every path is overridable, so nothing is machine-specific:
 
@@ -187,6 +194,10 @@ This repo adds a fifth: `opencode`.
 
 ## Known constraints
 
+- **Hermes needs several GB.** Its installer unpacks Python, Node, npm, ripgrep and
+  FFmpeg into `$HERMES_HOME/tools` and clones the agent — a fresh install lands
+  around 7 GB. `install.sh` checks for 4 GB free under `$HOME` first and refuses
+  early with a clear reason rather than dying halfway through the download.
 - **The `goal` string is the autonomy boundary.** A goal one finding can satisfy buys
   you one finding: the reason step completes the project and the remaining intents sit
   stranded. Scope it up front ("conclude or rule out every module") rather than
