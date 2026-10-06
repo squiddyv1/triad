@@ -24,3 +24,6 @@ venv/
 
 # --- dashboard (dependencies are installed by install.sh, never committed) ---
 tui/node_modules/
+
+# --- Rust dashboard (built artifacts, never committed) ---
+/tui-rs/target/
