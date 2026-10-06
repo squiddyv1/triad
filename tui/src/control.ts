@@ -35,6 +35,18 @@ export async function feed(target: Target) {
   return triadCommand(['feed', '--project', target.project, '--workdir', target.workdir!]);
 }
 
+// `up` builds and waits for the server and then the dispatcher, so the 20s default is
+// far too short; both still go through the CLI rather than signalling anything here.
+const STACK_TIMEOUT_MS = 240000;
+
+export async function stackUp(): Promise<string> {
+  return triadCommand(['up'], STACK_TIMEOUT_MS);
+}
+
+export async function stackDown(): Promise<string> {
+  return triadCommand(['down'], STACK_TIMEOUT_MS);
+}
+
 export type Flow = 'scan' | 'engage';
 export type ScanMode = 'quick' | 'standard' | 'deep';
 

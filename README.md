@@ -41,8 +41,10 @@ or log out and back in before going further.
 ## Quick start
 
 ```bash
-triad setup     # pick a provider; it shows that provider's real model list
-triad up        # start the Cairn server and the dispatcher
+./install.sh    # the CLI, Node and the dashboard
+
+triad           # open the dashboard; the first run walks setup, then press n for a new scan
+triad --status  # the text summary instead, for scripts
 
 triad engage --title ACME --target https://app.example \
              --goal "conclude or rule out every finding in scope" \
@@ -91,6 +93,7 @@ Strix's own dashboard for a live or finished run.
 
 | Command | What it does |
 |---|---|
+| `triad` | open the dashboard; first run walks setup. `--status` / `--no-tui` print the summary |
 | `triad setup` | one provider for both layers, written to `.env`, then offers to start |
 | `triad configure` | give Strix and the worker different providers or models |
 | `triad models` | list what a provider serves |
@@ -100,7 +103,7 @@ Strix's own dashboard for a live or finished run.
 | `triad scan` / `findings` / `feed` | those same steps on their own |
 | `triad progress` | how far along a running scan is, from its own state files |
 | `triad view` | open Strix's dashboard for a live or finished run |
-| `triad tui` | the terminal dashboard: every run, its telemetry, its controls |
+| `triad tui` | open the dashboard explicitly (the same app bare `triad` opens) |
 | `triad runs` | every run triad knows about, newest first |
 | `triad control` | pause, resume, stop or delete a scan or a project |
 | `triad watch` / `report` | follow the graph, then write it up |
@@ -108,15 +111,17 @@ Strix's own dashboard for a live or finished run.
 
 ## Dashboard
 
-`triad tui` opens a terminal dashboard over the same state the CLI reports: every run with
-its status, the Strix progress of the selected one (agents, todos, notes, findings,
-tokens), the Cairn project it fed into (facts, hints, intents, open work), and live
-telemetry for the sandbox container, the scan process and the dispatcher.
+`triad` (or `triad tui`) opens a terminal dashboard over the same state the CLI reports:
+every run with its status, the Strix progress of the selected one (agents, todos, notes,
+findings, tokens), the Cairn project it fed into (facts, hints, intents, open work), and
+live telemetry for the sandbox container, the scan process and the dispatcher. `triad
+--status` prints the text summary instead, and `--no-tui` does the same for scripts.
 
 Keys act on whichever side the footer names as the target. `tab` switches between the run
 and its graph, `p` pauses or resumes it, `s` stops it, `d` deletes it after asking, `f`
-feeds the run into its project again. A scan whose process is gone reads `stale` rather
-than `running`, because run.json keeps saying running after a kill.
+feeds the run into its project again, `u` starts the stack (`triad up`) and `x` takes it
+down after asking. A scan whose process is gone reads `stale` rather than `running`,
+because run.json keeps saying running after a kill.
 
 `n` opens a new-engagement form and starts either a scan or the full engage flow from the
 dashboard. `enter` on the STRIX pane opens the selected run's verbose progress: its own

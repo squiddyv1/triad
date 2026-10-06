@@ -86,7 +86,11 @@ export function runCommand(cmd: string, args: string[], timeoutMs = 20000): Prom
     const child = spawn(cmd, args, {stdio: ['ignore', 'pipe', 'pipe']});
     let out = '';
     let err = '';
-    const timer = setTimeout(() => child.kill('SIGKILL'), timeoutMs);
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill('SIGKILL');
+    }, timeoutMs);
     child.stdout.on('data', (d: Buffer) => (out += d));
     child.stderr.on('data', (d: Buffer) => (err += d));
     child.on('error', e => {
@@ -95,7 +99,9 @@ export function runCommand(cmd: string, args: string[], timeoutMs = 20000): Prom
     });
     child.on('close', code => {
       clearTimeout(timer);
-      if (code === 0) resolve(out);
+      // A killed child closes with a null code, which must not read as a successful exit.
+      if (timedOut) reject(new Error(`${cmd} ${args.join(' ')} timed out after ${Math.round(timeoutMs / 1000)}s`));
+      else if (code === 0) resolve(out);
       else reject(new Error(err.trim() || `${cmd} exited ${code}`));
     });
   });
@@ -105,8 +111,8 @@ export async function fetchSnapshot(): Promise<Snapshot> {
   return JSON.parse(await runCommand(PYTHON, [TRIAD_PY, 'runs', '--json']));
 }
 
-export function triadCommand(args: string[]): Promise<string> {
-  return runCommand(PYTHON, [TRIAD_PY, ...args]);
+export function triadCommand(args: string[], timeoutMs = 20000): Promise<string> {
+  return runCommand(PYTHON, [TRIAD_PY, ...args], timeoutMs);
 }
 
 // The CLI this app shells out to, so callers that need to spawn it detached (a full

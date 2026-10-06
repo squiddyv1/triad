@@ -12,7 +12,7 @@ import {
   readProc, type ProcSample, type ProgressDetail, type RunProgress, type Snapshot,
 } from './data.js';
 import {
-  feed, pauseOrResume, remove, startEngage, startScan, stop,
+  feed, pauseOrResume, remove, stackDown, stackUp, startEngage, startScan, stop,
   type Focus, type NewEngagement, type ScanMode, type Target,
 } from './control.js';
 import {Mascot} from './mascot.js';
@@ -26,6 +26,8 @@ const HELP = [
   ['s', 'stop the target'],
   ['d', 'delete the target (asks first)'],
   ['f', 'feed the selected run into its project again'],
+  ['u', 'start the stack (triad up)'],
+  ['x', 'stop the stack (triad down, asks first)'],
   ['c', 'collapse the run and project lists'],
   ['r', 'refresh now'],
   ['?', 'hide this help'],
@@ -125,6 +127,14 @@ function relativeAge(iso: string | null | undefined): string {
   const hours = Math.floor(minutes / 60);
   if (hours < 24) return `${hours}h${String(minutes % 60).padStart(2, '0')}m ago`;
   return `${Math.floor(hours / 24)}d ago`;
+}
+
+// `triad up` ends with a Next block, so prefer the line that says what happened
+// ("already answering", "dispatcher started"); the last line is the fallback.
+function stackSummary(out: string): string {
+  const lines = out.split('\n').map(l => l.trim()).filter(Boolean);
+  return lines.find(l => /already answering|dispatcher (started|is already)|the containers|network removed/.test(l))
+    ?? lines[lines.length - 1] ?? 'stack updated';
 }
 
 function Spinner({frame, color}: {frame: number; color?: string}) {
@@ -511,6 +521,26 @@ function DetailBody({run, project, focus, metrics, poll, dispatcherAlive}: {
             <Text dimColor>  {project.unclaimed} unclaimed  {project.working} working</Text>
           </Line>
         </>
+      ) : run.project ? (
+        // The link is on disk but the project list is empty because Cairn is down. The run
+        // is linked; saying otherwise sends the user to re-create a project that exists.
+        <>
+          <Line label="project">
+            <Text>{run.project}</Text>
+            <Text color="yellow">  linked</Text>
+          </Line>
+          <Line label="graph">
+            <Text color="yellow">unavailable — Cairn is not answering</Text>
+          </Line>
+          {run.project_fed_at ? (
+            <Line label="fed"><Text>{relativeAge(run.project_fed_at)}</Text></Line>
+          ) : null}
+          <Line label="dispatcher">
+            {dispatcherAlive
+              ? <Text dimColor>up</Text>
+              : <Text color="red">DOWN — nothing advances until it is up</Text>}
+          </Line>
+        </>
       ) : (
         <Line label="project">
           <Text dimColor>none linked — run </Text>
@@ -718,6 +748,7 @@ function App({interval}: {interval: number}) {
   const [focus, setFocus] = useState<Focus>('run');
   const [message, setMessage] = useState<{text: string; kind: 'ok' | 'err' | 'info'} | null>(null);
   const [pendingDelete, setPendingDelete] = useState<Target | null>(null);
+  const [pendingStackDown, setPendingStackDown] = useState(false);
   const [help, setHelp] = useState(false);
   const [listsCollapsed, setListsCollapsed] = useState(false);
   const [containers, setContainers] = useState<Record<string, {cpu: string; mem: string}>>({});
@@ -932,11 +963,13 @@ function App({interval}: {interval: number}) {
     if (target !== detailOffset) setDetailOffset(target);
   }, [detail, stream.length, streamHeight, detailOffset, detailFollow, detailPane, topMessageId]);
 
-  const act = useCallback(async (label: string, fn: () => Promise<string>) => {
+  const act = useCallback(async (label: string, fn: () => Promise<string>,
+                                 summarise?: (out: string) => string) => {
     setMessage({text: `${label}…`, kind: 'info'});
     try {
       const out = await fn();
-      const line = out.trim().split('\n').filter(Boolean).pop() ?? `${label} done`;
+      const picked = summarise ? summarise(out) : out.trim().split('\n').filter(Boolean).pop();
+      const line = picked ?? `${label} done`;
       setMessage({text: line.replace(/^\s*[✓!✗]\s*/, ''), kind: 'ok'});
     } catch (e) {
       setMessage({text: e instanceof Error ? e.message : String(e), kind: 'err'});
@@ -1026,6 +1059,19 @@ function App({interval}: {interval: number}) {
       return;
     }
 
+    // The stack confirmation owns the keys in both the list and the detail view, so
+    // `down` cannot be half-answered.
+    if (pendingStackDown) {
+      if (input === 'y') {
+        setPendingStackDown(false);
+        void act('stopping the stack', stackDown, stackSummary);
+      } else if (input === 'n' || key.escape) {
+        setPendingStackDown(false);
+        setMessage({text: 'stop cancelled', kind: 'info'});
+      }
+      return;
+    }
+
     if (mode === 'verbose') {
       if (input === 'q' || (key.ctrl && input === 'c')) return exit();
       if (key.escape || key.return) { setMode('list'); return; }
@@ -1035,6 +1081,8 @@ function App({interval}: {interval: number}) {
         if (detailTarget) void loadDetail(detailTarget.workdir, detailTarget.run);
         return;
       }
+      if (input === 'u') return void act('starting the stack', stackUp, stackSummary);
+      if (input === 'x') return setPendingStackDown(true);
       // tab moves between the two panes; the list view keeps its own tab meaning.
       if (key.tab) {
         setDetailPane(p => (p === 'findings' ? 'stream' : 'findings'));
@@ -1112,6 +1160,9 @@ function App({interval}: {interval: number}) {
       if (run && focus === 'run') openDetail(run);
       return;
     }
+    // Stack control is independent of the selected run, so it works with no runs too.
+    if (input === 'u') return void act('starting the stack', stackUp, stackSummary);
+    if (input === 'x') return setPendingStackDown(true);
     if (!run) return;
     if (input === 'p') {
       const paused = focus === 'graph' ? project?.status === 'stopped' : run.paused;
@@ -1247,18 +1298,27 @@ function App({interval}: {interval: number}) {
         </Box>
       </Box>
 
-      <Box flexDirection="column">
+      <Box flexDirection="column" flexShrink={0}>
         {mode === 'form' ? (
           <Text dimColor>form open: esc cancels, no other key acts</Text>
         ) : mode === 'verbose' ? (
-          <Text dimColor>
-            esc back  tab pane  ↑/↓ scroll  g/G top/end  r refresh  c lists  pane: {detailPane}  {'  '}
-            {detailFollow
-              ? 'follow: on (tail -f)'
-              : detailNew > 0
-                ? `paused · ↓ ${detailNew} new`
-                : 'paused · ↑ scrolled'}  q quit
-          </Text>
+          <>
+            {pendingStackDown ? (
+              <Text color="yellow">stop the stack? (y/n)</Text>
+            ) : message ? (
+              <Text color={message.kind === 'err' ? 'red' : message.kind === 'ok' ? 'green' : 'gray'}>
+                {message.kind === 'err' ? '✗ ' : message.kind === 'ok' ? '✓ ' : '  '}{message.text}
+              </Text>
+            ) : null}
+            <Text dimColor>
+              esc back  tab pane  ↑/↓ scroll  g/G top/end  u up  x down  r refresh  c lists  pane: {detailPane}  {'  '}
+              {detailFollow
+                ? 'follow: on (tail -f)'
+                : detailNew > 0
+                  ? `paused · ↓ ${detailNew} new`
+                  : 'paused · ↑ scrolled'}  q quit
+            </Text>
+          </>
         ) : (
           <>
             {help && (
@@ -1273,12 +1333,15 @@ function App({interval}: {interval: number}) {
                 delete the {focus === 'graph' ? 'project' : 'run'} {focus === 'graph' ? run?.project : run?.run}? (y/n)
               </Text>
             )}
-            {message && !pendingDelete && (
+            {pendingStackDown && (
+              <Text color="yellow">stop the stack? (y/n)</Text>
+            )}
+            {message && !pendingDelete && !pendingStackDown && (
               <Text color={message.kind === 'err' ? 'red' : message.kind === 'ok' ? 'green' : 'gray'}>
                 {message.kind === 'err' ? '✗ ' : message.kind === 'ok' ? '✓ ' : '  '}{message.text}
               </Text>
             )}
-            <Text dimColor>n new  p pause  s stop  d delete  f feed  c lists  enter detail  tab target: {focus}  r refresh  ? help  q quit</Text>
+            <Text dimColor>n new  p pause  s stop  d delete  f feed  u up  x down  c lists  enter detail  tab target: {focus}  r refresh  ? help  q quit</Text>
           </>
         )}
       </Box>

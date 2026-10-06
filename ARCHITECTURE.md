@@ -133,7 +133,8 @@ write", not a prompt asking the model to be careful.
 - **`triad.py` → everything: direct import.** The driver is the baseline surface. It
   loads `plugin/cairn.py` and `plugin/strix.py` as plain modules and calls them. No
   agent framework, no MCP, no plugin host: this is what makes Hermes optional rather
-  than load-bearing.
+  than load-bearing. Bare `triad` opens the dashboard once configured (the wizard runs
+  first otherwise); `triad --status` keeps the text summary for scripts.
 - **Hermes → Cairn: REST, via the `cairn_*` plugin tools** (optional). The control
   plane reasons about the graph (open intents, dead ends, path to goal) and writes
   hints/intents. It does not need the graph as chat context; it needs typed operations.
@@ -306,8 +307,10 @@ findings, so read the artifacts and the log rather than the status field alone.
 
 ### 4.7 The dashboard
 
-`triad tui` is an Ink (React for terminals) app over `triad runs --json`: one poll of that
-one command, so the dashboard cannot disagree with the CLI about what is running. It shows
+Bare `triad` opens the dashboard, which is the normal way in; `triad tui` is the explicit
+form and is what a caller that needs its exit code uses. It is an Ink (React for terminals)
+app over `triad runs --json`: one poll of that one command, so the dashboard cannot
+disagree with the CLI about what is running. It shows
 the runs, the Strix progress of the selected one, the Cairn project that run fed into, and
 telemetry gathered where it actually lives: `docker stats` for the sandbox and the Cairn
 server, and `/proc/<pid>/{stat,status}` deltas for the scan and dispatcher processes (CPU
@@ -317,7 +320,8 @@ Every control goes back through `triad control`, so the dashboard cannot invent 
 change the CLI does not support: pause is `SIGSTOP` on the scan's process group, resume is
 `SIGCONT`, stop is `SIGTERM`, and for a project they are `status: stopped` / `status:
 active` / `DELETE`. Deleting a run removes only a directory inside `strix_runs/`, and the
-UI asks first.
+UI asks first. `u` and `x` do not signal anything themselves either: they run `triad up`
+and `triad down`, with `x` asking first because `down` removes the containers.
 
 Two details the UI depends on and the CLI provides: a launch records its pid in
 `<workdir>/strix_last_launch.pid` (with a `/proc` search by working directory as the

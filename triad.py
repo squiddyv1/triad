@@ -2494,19 +2494,49 @@ def cmd_auth(args):
     return 0
 
 
+def _dashboard_available():
+    """Whether the dashboard could open: node >= 18 and its deps are on disk.
+
+    cmd_home uses this to fall back silently; cmd_tui still owns the message
+    that names what is missing for an explicit `triad tui`.
+    """
+    tui = _repo_root() / "tui"
+    if not (tui / "node_modules" / "ink").is_dir():
+        return False
+    node = _node_bin()
+    if not node:
+        return False
+    major = _node_major(_node_version(node))
+    return major is not None and major >= 18
+
+
+def _on_tty():
+    return sys.stdin.isatty() and sys.stdout.isatty()
+
+
 def cmd_home(args):
-    """Bare `triad`: say where things stand, and offer setup if they are not."""
-    print(f"{_colour('triad', _BOLD)}  Strix (discovery) + Cairn (exploitation)")
+    """Bare `triad`: open the dashboard, or say where things stand when it cannot."""
     env = _env_read()
     configured = bool(env.get("LLM_API_KEY"))
+    # The escape hatches keep the scriptable summary reachable on a terminal.
+    text_only = getattr(args, "status", False) or getattr(args, "no_tui", False)
     if not configured:
+        print(f"{_colour('triad', _BOLD)}  Strix (discovery) + Cairn (exploitation)")
         _warn("not configured yet" if env else f"no {_env_path()} yet")
-        if sys.stdin.isatty():
+        if sys.stdin.isatty() and not text_only:
             print("  Running the setup wizard.")
-            return cmd_setup(args)
+            code = cmd_setup(args)
+            # A first run should land in the dashboard, not the summary, when it can.
+            if code == 0 and _on_tty() and _dashboard_available():
+                return cmd_tui(args)
+            return code
         print("  Run:  triad setup")
         return 0
 
+    if not text_only and _on_tty() and _dashboard_available():
+        return cmd_tui(args)
+
+    print(f"{_colour('triad', _BOLD)}  Strix (discovery) + Cairn (exploitation)")
     _ok(f"model {env.get('STRIX_LLM') or '(unset)'}")
     _ok(f"key   {_mask(env.get('LLM_API_KEY'))}")
     base = _base_url()
@@ -2544,6 +2574,12 @@ def cmd_home(args):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="triad", description=(__doc__ or "triad").splitlines()[0])
+    # Bare `triad` opens the dashboard; these two keep the text summary for scripts
+    # and for a terminal that should not host the TUI.
+    ap.add_argument("--status", action="store_true",
+                    help="print the text summary instead of opening the dashboard")
+    ap.add_argument("--no-tui", action="store_true",
+                    help="print the text summary instead of opening the dashboard")
     sub = ap.add_subparsers(dest="cmd")
 
     su = sub.add_parser("setup", help="interactive first run: keys, then start the stack")
