@@ -48,13 +48,132 @@ function fit(text: string, width: number): string {
   return text.length > width ? text.slice(0, width - 1) + '…' : text.padEnd(width);
 }
 
-function Row({run, selected}: {run: RunProgress; selected: boolean}) {
+const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+
+// A stable colour per agent: the hash is by name, so an agent keeps its colour across
+// frames and across runs that reuse a name.
+const AGENT_PALETTE = ['cyan', 'magenta', 'green', 'yellow', 'blue', 'white'];
+
+const SEVERITY_COLOUR: Record<string, string> = {
+  critical: 'magenta', high: 'red', medium: 'yellow', low: 'cyan', info: 'gray',
+  informational: 'gray',
+};
+
+// What a failed-looking tool result reads like. Deliberately narrow: these are the words
+// Strix uses when it reports an error, not every occurrence of "fail" in prose.
+const FAILURE_RE = /\b(error|failed|failure|exception|traceback|denied|refused|not found|no such file)\b/i;
+
+function agentColour(name: string): string {
+  let hash = 0;
+  for (let i = 0; i < name.length; i++) hash = (hash * 31 + name.charCodeAt(i)) >>> 0;
+  return AGENT_PALETTE[hash % AGENT_PALETTE.length];
+}
+
+function severityColour(severity: string | null | undefined): string {
+  return SEVERITY_COLOUR[String(severity ?? '').toLowerCase()] ?? 'gray';
+}
+
+function Spinner({frame, color}: {frame: number; color?: string}) {
+  const index = ((frame % SPINNER_FRAMES.length) + SPINNER_FRAMES.length) % SPINNER_FRAMES.length;
+  return <Text color={color}>{SPINNER_FRAMES[index]}</Text>;
+}
+
+type Span = {text: string; color?: string; dim?: boolean; bold?: boolean};
+type Line = Span[];
+
+// Wrap spans to the pane width, breaking at spaces when possible and hard-breaking any
+// token longer than the width. Every rendered line is therefore <= width, so Ink never
+// has to wrap (and never clips past the pane border).
+function wrapSpans(spans: Span[], width: number): Line[] {
+  const limit = Math.max(4, width);
+  const lines: Line[] = [];
+  // Preserve the leading indent of the logical line on every continuation, so wrapped
+  // findings and stream bodies stay under their own heading instead of hitting column 0.
+  const head = spans.length ? (/^\s*/.exec(spans[0].text)?.[0] ?? '') : '';
+  let current: Line = [];
+  let length = 0;
+  const flush = () => {
+    lines.push(current);
+    current = head ? [{text: head}] : [];
+    length = head ? head.length : 0;
+  };
+  const add = (text: string, style: Span) => {
+    let rest = text;
+    while (rest.length) {
+      const room = limit - length;
+      if (room <= 0) { flush(); continue; }
+      const chunk = rest.slice(0, room);
+      current.push({...style, text: chunk});
+      length += chunk.length;
+      rest = rest.slice(chunk.length);
+      if (rest.length) flush();
+    }
+  };
+  for (const span of spans) {
+    const parts = span.text.split('\n');
+    for (let p = 0; p < parts.length; p++) {
+      if (p > 0) flush();
+      const words = parts[p].split(' ');
+      for (let w = 0; w < words.length; w++) {
+        const word = words[w];
+        const sep = w > 0 ? ' ' : '';
+        if (!word) { if (sep) add(sep, span); continue; }
+        if (length + sep.length + word.length <= limit) {
+          if (sep) add(sep, span);
+          add(word, span);
+        } else {
+          if (length > 0) flush();
+          add(word, span);
+        }
+      }
+    }
+  }
+  if (current.length) lines.push(current);
+  return lines.length ? lines : [[]];
+}
+
+function gapText(gap: unknown): string {
+  if (typeof gap === 'string') return gap;
+  if (gap && typeof gap === 'object') {
+    const o = gap as {message?: string; title?: string; rule?: string};
+    return o.message || o.title || o.rule || JSON.stringify(gap);
+  }
+  return String(gap);
+}
+
+function severityTally(findings: {severity?: string | null}[]): string {
+  const order = ['critical', 'high', 'medium', 'low', 'info'];
+  const counts = new Map<string, number>();
+  for (const f of findings) {
+    const key = String(f.severity ?? '?').toLowerCase();
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  return [...counts.entries()]
+    .sort((a, b) => (order.indexOf(a[0]) + 1 || 99) - (order.indexOf(b[0]) + 1 || 99))
+    .map(([sev, n]) => `${sev} ${n}`)
+    .join(' · ');
+}
+
+function LineView({line}: {line: Line}) {
+  if (!line.length) return <Text> </Text>;
+  return (
+    <Text>
+      {line.map((s, i) => (
+        <Text key={i} color={s.color} dimColor={s.dim} bold={s.bold}>{s.text}</Text>
+      ))}
+    </Text>
+  );
+}
+
+function Row({run, selected, frame}: {run: RunProgress; selected: boolean; frame: number}) {
   const state = stateOf(run);
   const colour = STATE_COLOUR[state] ?? 'gray';
   return (
     <Box>
       <Text color={selected ? 'cyan' : undefined}>{selected ? '▸ ' : '  '}</Text>
-      <Text color={colour}>{run.live || run.paused ? '●' : '○'} </Text>
+      {run.live || run.paused
+        ? <><Spinner frame={frame} color={colour} /><Text color={colour}> </Text></>
+        : <Text color={colour}>○ </Text>}
       <Text bold={selected} color={selected ? 'white' : undefined}>
         {fit(run.run, 23)}
       </Text>
@@ -191,72 +310,118 @@ function Form({fields, row, error}: {fields: NewEngagement; row: number; error: 
   );
 }
 
-type DocLine = {text: string; dim?: boolean; color?: string; bold?: boolean};
+function buildHeader(d: ProgressDetail, width: number, findingsShown: number, gapsShown: number): Line[] {
+  const lines: Line[] = [];
+  const push = (spans: Span[]) => { for (const line of wrapSpans(spans, width)) lines.push(line); };
+  const state = stateOf(d);
 
-function buildDoc(d: ProgressDetail, width: number): {lines: DocLine[]; streamEnd: number} {
-  const lines: DocLine[] = [];
-  const push = (text: string, opts: Omit<DocLine, 'text'> = {}) => lines.push({text, ...opts});
-  const wrapPush = (text: string, opts: Omit<DocLine, 'text'> = {}, indent = 0) => {
-    const pad = ' '.repeat(indent);
-    const room = Math.max(8, width - indent);
-    for (const raw of (text ?? '').split('\n')) {
-      if (!raw) { push(pad, opts); continue; }
-      for (let i = 0; i < raw.length; i += room) push(pad + raw.slice(i, i + room), opts);
-    }
-  };
+  push([
+    {text: ' '},
+    {text: d.run, bold: true, color: 'cyan'},
+    {text: '  '},
+    {text: state, color: STATE_COLOUR[state] ?? 'gray'},
+    {text: `  ${elapsed(d.start_time, d.end_time)}  pid ${d.pid ?? '-'}`, dim: true},
+  ]);
 
-  push(d.run, {bold: true, color: 'cyan'});
-  push(`state ${stateOf(d)}  ${elapsed(d.start_time, d.end_time)}  pid ${d.pid ?? '-'}`, {dim: true});
-  push('');
+  const running = d.agents.running.filter(Boolean);
+  push([
+    {text: ' agents '},
+    {text: `${d.agents.completed}/${d.agents.total} done`,
+     color: d.agents.completed === d.agents.total ? 'green' : undefined},
+    ...(running.length
+      ? [{text: `  running: ${running.slice(0, 3).join(', ')}${running.length > 3 ? ` +${running.length - 3}` : ''}`, color: 'cyan'}]
+      : []),
+    ...(d.agents.failed ? [{text: `  ${d.agents.failed} failed`, color: 'red'}] : []),
+  ]);
 
+  const findings = d.findings_detail ?? [];
+  const total = findings.length || d.findings || 0;
+  push([
+    {text: ' findings '},
+    {text: String(total), bold: true, color: total ? 'white' : 'gray'},
+    ...(findings.length ? [{text: `  ${severityTally(findings)}`, dim: true}] : []),
+  ]);
+  for (const f of findings.slice(0, findingsShown)) {
+    const colour = severityColour(f.severity);
+    push([
+      {text: '   '},
+      {text: `[${String(f.severity ?? '?').toLowerCase()}] `, color: colour},
+      {text: f.title ?? '(untitled)', color: colour},
+    ]);
+  }
+  if (findings.length > findingsShown) {
+    push([{text: `   +${findings.length - findingsShown} more findings`, dim: true}]);
+  }
+
+  const summary = (d.coverage?.summary && typeof d.coverage.summary === 'object')
+    ? d.coverage.summary as {surfaces_reviewed?: number; findings_filed?: number; gaps?: number}
+    : {};
+  const gaps = Array.isArray(d.coverage?.gaps) ? d.coverage.gaps : [];
+  const gapCount = typeof summary.gaps === 'number' ? summary.gaps : gaps.length;
+  push([
+    {text: ' coverage '},
+    {text: `${summary.surfaces_reviewed ?? 0} surfaces reviewed · ${summary.findings_filed ?? 0} filed · `},
+    {text: `${gapCount} gap${gapCount === 1 ? '' : 's'}`, color: gapCount ? 'yellow' : 'green'},
+  ]);
+  for (const gap of gaps.slice(0, gapsShown)) {
+    push([{text: '   · '}, {text: gapText(gap), color: 'yellow'}]);
+  }
+  if (gaps.length > gapsShown) push([{text: `   +${gaps.length - gapsShown} more gaps`, dim: true}]);
+
+  push([
+    {text: ' usage '},
+    {text: `${human(d.usage.input_tokens)} in / ${human(d.usage.output_tokens)} out`},
+    {text: ` · ${d.usage.requests ?? '-'} requests`},
+    {text: ` · $${d.cost_usd ?? '-'}`, dim: true},
+  ]);
+
+  push([{text: `AGENT STREAM (${(d.messages ?? []).length})`, bold: true, color: 'white'}]);
+  return lines;
+}
+
+function buildStream(d: ProgressDetail, width: number): Line[] {
+  const lines: Line[] = [];
+  const push = (spans: Span[]) => { for (const line of wrapSpans(spans, width)) lines.push(line); };
   const messages = d.messages ?? [];
-  push(`AGENT STREAM (${messages.length})`, {bold: true});
-  if (!messages.length) push('  (no agent messages yet)', {dim: true});
+  if (!messages.length) {
+    push([{text: '  (no agent messages yet)', dim: true}]);
+    return lines;
+  }
   for (const m of messages) {
-    const marker = m.type === 'function_call' ? `call ${m.tool ?? '?'}` : m.type;
-    const output = m.type === 'function_call_output';
-    push(`  ${m.agent_name} · ${marker}${m.truncated ? ' [truncated]' : ''}`,
-         {dim: true, color: output ? 'gray' : undefined});
-    wrapPush(m.text || '(empty)',
-             {dim: output || m.type === 'reasoning', color: output ? 'gray' : undefined}, 4);
-    push('');
+    const failed = m.type === 'function_call_output' && FAILURE_RE.test(m.text ?? '');
+    const name = m.agent_name || '?';
+    const stamp = (m.at ?? '').slice(11, 19);
+    const head: Span[] = [{text: '  '}];
+    if (stamp) head.push({text: `${stamp} `, dim: true});
+    head.push({text: name, color: agentColour(name)});
+    head.push({text: ' · ', dim: true});
+    if (m.type === 'function_call') {
+      head.push({text: 'call ', color: 'cyan'});
+      head.push({text: m.tool ?? '?', color: 'cyan', bold: true});
+    } else if (m.type === 'function_call_output') {
+      head.push({text: 'result', color: failed ? 'red' : undefined, dim: !failed});
+    } else if (m.type === 'reasoning') {
+      head.push({text: 'reasoning', dim: true});
+    } else {
+      head.push({text: m.type});
+    }
+    if (m.truncated) head.push({text: ' [truncated]', dim: true});
+    push(head);
+
+    let dim = false;
+    let colour: string | undefined;
+    if (m.type === 'reasoning' || m.type === 'function_call') dim = true;
+    else if (m.type === 'function_call_output') {
+      if (failed) colour = 'red';
+      else dim = true;
+    }
+    const body = (m.text ?? '').replace(/\r/g, '');
+    for (const raw of (body.length ? body.split('\n') : ['(empty)'])) {
+      push([{text: '    '}, {text: raw.replace(/\t/g, '  '), color: colour, dim}]);
+    }
+    push([]);
   }
-  const streamEnd = lines.length - 1;
-
-  push('AGENTS', {bold: true});
-  if (d.agents_detail?.length) {
-    for (const a of d.agents_detail) push(`  ${a.status.padEnd(10)} ${a.name}`);
-  } else {
-    push('  (none)', {dim: true});
-  }
-
-  push('');
-  push('FINDINGS', {bold: true});
-  if (d.findings_detail?.length) {
-    for (const f of d.findings_detail) wrapPush(`  [${f.severity ?? '?'}] ${f.title ?? ''}`);
-  } else {
-    push('  (none)', {dim: true});
-  }
-
-  push('');
-  push('COVERAGE', {bold: true});
-  if (d.coverage?.summary !== undefined) {
-    wrapPush(`  summary: ${JSON.stringify(d.coverage.summary).slice(0, 600)}`, {dim: true});
-  }
-  if (d.coverage?.gaps) push(`  gaps: ${d.coverage.gaps.length}`, {dim: true});
-  if (d.coverage?.summary === undefined && !d.coverage?.gaps) push('  (none)', {dim: true});
-
-  push('');
-  push(`USAGE  tokens ${human(d.usage.input_tokens)} in / ${human(d.usage.output_tokens)} out  ` +
-       `requests ${d.usage.requests ?? '-'}  cost $${d.cost_usd ?? '-'}`, {dim: true});
-
-  push('');
-  const tail = d.log_tail ?? [];
-  push(`STRIX.LOG (last ${tail.length} lines)`, {bold: true});
-  if (!tail.length) push('  (no log)', {dim: true});
-  for (const line of tail) wrapPush('  ' + line.slice(0, 500), {dim: true, color: 'gray'});
-
-  return {lines, streamEnd};
+  return lines;
 }
 
 function App({interval}: {interval: number}) {
@@ -282,7 +447,10 @@ function App({interval}: {interval: number}) {
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailTarget, setDetailTarget] = useState<{workdir: string; run: string} | null>(null);
   const [detailOffset, setDetailOffset] = useState(0);
-  const [detailPinned, setDetailPinned] = useState(true);
+  const [detailNew, setDetailNew] = useState(0);
+  const [detailFollow, setDetailFollow] = useState(true);
+  const [frame, setFrame] = useState(0);
+  const scrollReset = useRef(true);
 
   const refresh = useCallback(async () => {
     if (busy.current) return;
@@ -341,6 +509,17 @@ function App({interval}: {interval: number}) {
   }, [mode, detailTarget, loadDetail, interval]);
 
   const runs = snapshot?.runs ?? [];
+  const liveRuns = runs.filter(r => r.live || r.paused);
+  const liveCount = liveRuns.length;
+
+  // The ticker only exists while something is live: no live runs means no timer, no
+  // re-renders, and a dashboard that costs nothing when idle.
+  useEffect(() => {
+    if (liveCount === 0) return undefined;
+    const timer = setInterval(() => setFrame(f => f + 1), 120);
+    return () => clearInterval(timer);
+  }, [liveCount]);
+
   const index = Math.min(selected, Math.max(0, runs.length - 1));
   const run = runs[index] ?? null;
   const project = (() => {
@@ -360,15 +539,72 @@ function App({interval}: {interval: number}) {
   const rows = process.stdout.rows ?? 40;
   const cols = process.stdout.columns ?? 132;
   const viewHeight = Math.max(5, rows - 6);
+  // -50 leaves the RUNS column (46) plus the pane border and padding; pre-wrapping to this
+  // width keeps every rendered line inside the box.
   const paneWidth = Math.max(24, cols - 50);
-  const doc = useMemo(() => (detail ? buildDoc(detail, paneWidth) : null), [detail, paneWidth]);
-  const maxOffset = doc ? Math.max(0, doc.lines.length - viewHeight) : 0;
 
-  // Opening the view lands on the newest stream entry, which is what a live run is about.
+  // The header gets a share of the pane and the stream gets the rest; capping the findings
+  // and gaps lists keeps a run with a hundred findings from swallowing the stream.
+  const findingsCap = Math.max(2, Math.floor((viewHeight - 6) * 0.34));
+  const gapsCap = Math.max(1, Math.floor((viewHeight - 6) * 0.15));
+  const header = useMemo(
+    () => (detail ? buildHeader(detail, paneWidth, findingsCap, gapsCap) : []),
+    [detail, paneWidth, findingsCap, gapsCap],
+  );
+  const stream = useMemo(() => (detail ? buildStream(detail, paneWidth) : []), [detail, paneWidth]);
+
+  const detailRun = detailTarget
+    ? runs.find(r => r.workdir === detailTarget.workdir && r.run === detailTarget.run) ?? null
+    : null;
+  const detailLive = Boolean(detailRun?.live || detailRun?.paused);
+  const currentText = detail?.agents.running?.[0]
+    ?? detail?.todos_detail?.find(t => t.status === 'in_progress')?.title
+    ?? 'working';
+  const liveRow = detailLive ? 1 : 0;
+
+  const shownHeader = header.slice(0, Math.max(3, viewHeight - 4 - liveRow));
+  const streamHeight = Math.max(3, viewHeight - shownHeader.length - liveRow);
+  const maxOffset = Math.max(0, stream.length - streamHeight);
+  const clampedOffset = Math.min(detailOffset, maxOffset);
+  const topMessageId = detail?.messages?.length ? detail.messages[detail.messages.length - 1].id : 0;
+
+  // Follow the tail only when the follow intent and the live offset agree. Judging "at the
+  // bottom" from the offset and the previously rendered length means a stale flag cannot
+  // pin the view; counting new messages by id survives the 200-message window sliding.
+  const prevMaxRef = useRef(0);
+  const prevLenRef = useRef(0);
+  const baselineIdRef = useRef(0);
   useEffect(() => {
-    if (mode !== 'verbose' || !detailPinned || !doc) return;
-    setDetailOffset(Math.max(0, doc.streamEnd - viewHeight + 1));
-  }, [mode, detailPinned, doc, viewHeight]);
+    if (!detail) return;
+    const newMax = Math.max(0, stream.length - streamHeight);
+    if (scrollReset.current) {
+      scrollReset.current = false;
+      prevMaxRef.current = newMax;
+      prevLenRef.current = stream.length;
+      baselineIdRef.current = topMessageId;
+      setDetailOffset(newMax);
+      setDetailFollow(true);
+      setDetailNew(0);
+      return;
+    }
+    const wasAtBottom = detailOffset >= prevMaxRef.current;
+    const shift = stream.length - prevLenRef.current;
+    prevMaxRef.current = newMax;
+    prevLenRef.current = stream.length;
+    if (detailFollow && wasAtBottom) {
+      setDetailOffset(newMax);
+      setDetailNew(0);
+      baselineIdRef.current = topMessageId;
+      return;
+    }
+    if (detailFollow) setDetailFollow(false);
+    if (baselineIdRef.current === 0) baselineIdRef.current = topMessageId;
+    setDetailNew((detail.messages ?? []).filter(m => m.id > baselineIdRef.current).length);
+    // When the 200-message window slides, lines leave the top: move the paused offset by
+    // the same amount so the messages on screen do not jump under the reader.
+    const target = Math.max(0, Math.min(newMax, detailOffset + Math.min(0, shift)));
+    if (target !== detailOffset) setDetailOffset(target);
+  }, [detail, stream.length, streamHeight, detailOffset, detailFollow, topMessageId]);
 
   const act = useCallback(async (label: string, fn: () => Promise<string>) => {
     setMessage({text: `${label}…`, kind: 'info'});
@@ -387,8 +623,10 @@ function App({interval}: {interval: number}) {
     setDetail(null);
     setDetailError(null);
     setDetailLoading(false);
-    setDetailPinned(true);
+    scrollReset.current = true;
     setDetailOffset(0);
+    setDetailNew(0);
+    setDetailFollow(true);
     if (!r.workdir) {
       setDetailTarget(null);
       setDetailError('this run has no directory on disk');
@@ -467,16 +705,34 @@ function App({interval}: {interval: number}) {
         if (detailTarget) void loadDetail(detailTarget.workdir, detailTarget.run);
         return;
       }
+      // Scrolling up pauses; reaching the bottom again (or End) resumes. Home stops at the
+      // top. The follow intent is validated against the offset by the stream effect.
       const step = (delta: number) => {
-        setDetailPinned(false);
-        setDetailOffset(o => Math.min(maxOffset, Math.max(0, o + delta)));
+        const next = Math.min(maxOffset, Math.max(0, detailOffset + delta));
+        if (next >= maxOffset) {
+          setDetailFollow(true);
+          setDetailNew(0);
+        } else {
+          setDetailFollow(false);
+          baselineIdRef.current = topMessageId;
+        }
+        setDetailOffset(next);
       };
       if (key.upArrow || input === 'k') return step(-1);
       if (key.downArrow || input === 'j') return step(1);
-      if (key.pageUp) return step(-viewHeight);
-      if (key.pageDown) return step(viewHeight);
-      if (input === 'g') { setDetailPinned(false); setDetailOffset(0); return; }
-      if (input === 'G') { setDetailPinned(false); setDetailOffset(maxOffset); return; }
+      if (key.pageUp) return step(-streamHeight);
+      if (key.pageDown) return step(streamHeight);
+      if (key.home || input === 'g') {
+        setDetailFollow(false);
+        baselineIdRef.current = topMessageId;
+        setDetailNew(0);
+        return setDetailOffset(0);
+      }
+      if (key.end || input === 'G') {
+        setDetailFollow(true);
+        setDetailNew(0);
+        return setDetailOffset(maxOffset);
+      }
       return;
     }
 
@@ -545,14 +801,23 @@ function App({interval}: {interval: number}) {
   };
   const cairnLine = cairn ? `  cairn ${cairn.cpu} cpu  ${cairn.mem}` : '';
 
-  const clampedOffset = doc ? Math.min(detailOffset, maxOffset) : 0;
-  const window = doc ? doc.lines.slice(clampedOffset, clampedOffset + viewHeight) : [];
+  const window = stream.slice(clampedOffset, clampedOffset + streamHeight);
   const hasDb = detail?.dir ? existsSync(join(detail.dir, '.state', 'agents.db')) : true;
 
   return (
     <Box flexDirection="column" height={rows - 1}>
       <Box justifyContent="space-between">
-        <Text bold color="cyan">TRIAD</Text>
+        <Box>
+          {liveCount > 0 ? (
+            <>
+              <Spinner frame={frame} color="cyan" />
+              <Text bold color={frame % 2 ? 'white' : 'cyan'}> TRIAD</Text>
+              <Text dimColor> scanning · {liveCount} live</Text>
+            </>
+          ) : (
+            <Text bold color="cyan">TRIAD</Text>
+          )}
+        </Box>
         <Text dimColor>
           {snapshot ? `${snapshot.cairn.base} ${snapshot.cairn.up ? 'up' : 'DOWN'}` : 'loading…'}
           {cairnLine}  dispatcher {snapshot?.dispatcher.alive ? 'up' : 'down'}
@@ -563,7 +828,7 @@ function App({interval}: {interval: number}) {
         <Box flexDirection="column" width={46}>
           <Text bold>RUNS ({runs.length})</Text>
           {runs.length === 0 && <Text dimColor>  none</Text>}
-          {runs.map((r, i) => <Row key={r.dir} run={r} selected={i === index} />)}
+          {runs.map((r, i) => <Row key={r.dir} run={r} selected={i === index} frame={frame} />)}
           <Box marginTop={1} flexDirection="column">
             <Text bold>PROJECTS ({snapshot?.cairn.projects.length ?? 0})</Text>
             {(snapshot?.cairn.projects ?? []).map(p => (
@@ -583,11 +848,23 @@ function App({interval}: {interval: number}) {
               {detailError && <Text color="red">{detailError}</Text>}
               {!detail && !detailError && <Text dimColor>{detailLoading ? 'loading…' : 'no detail'}</Text>}
               {detail && !hasDb && <Text color="yellow">no agents.db yet for this run</Text>}
-              {window.map((line, i) => (
-                <Text key={clampedOffset + i} dimColor={line.dim} color={line.color} bold={line.bold}>
-                  {line.text || ' '}
-                </Text>
-              ))}
+              {detail && (
+                <>
+                  {detailLive && (
+                    <Box>
+                      <Spinner frame={frame} color="cyan" />
+                      <Text dimColor> scanning  </Text>
+                      <Text color="cyan">{currentText}</Text>
+                    </Box>
+                  )}
+                  {shownHeader.map((line, i) => <LineView key={`h${i}`} line={line} />)}
+                  <Box flexDirection="column" height={streamHeight}>
+                    {window.map((line, i) => (
+                      <LineView key={`s${clampedOffset + i}`} line={line} />
+                    ))}
+                  </Box>
+                </>
+              )}
             </Box>
           ) : error ? (
             <Text color="red">{error}</Text>
@@ -601,7 +878,14 @@ function App({interval}: {interval: number}) {
         {mode === 'form' ? (
           <Text dimColor>form open: esc cancels, no other key acts</Text>
         ) : mode === 'verbose' ? (
-          <Text dimColor>esc back  ↑/↓ scroll  r refresh  q quit</Text>
+          <Text dimColor>
+            esc back  ↑/↓ scroll  g/G top/end  r refresh  {'  '}
+            {detailFollow
+              ? 'follow: on (tail -f)'
+              : detailNew > 0
+                ? `paused · ↓ ${detailNew} new`
+                : 'paused · ↑ scrolled'}  q quit
+          </Text>
         ) : (
           <>
             {help && (

@@ -111,9 +111,11 @@ export function triadSpawn(args: string[]): {cmd: string; args: string[]} {
   return {cmd: PYTHON, args: [TRIAD_PY, ...args]};
 }
 
+// The dashboard no longer renders the log tail, so ask for zero lines: the flag and the
+// `log_tail` key stay for other callers, but this view never pays to transfer them.
 export async function fetchProgressDetail(workdir: string, run: string): Promise<ProgressDetail> {
   return JSON.parse(await runCommand(PYTHON, [TRIAD_PY, 'progress', '--verbose', '--json',
-    '--workdir', workdir, '--run', run, '--messages', '200']));
+    '--workdir', workdir, '--run', run, '--messages', '200', '--log-lines', '0']));
 }
 
 // Containers: find the ones that matter (the scan sandbox, the Cairn server), then ask
