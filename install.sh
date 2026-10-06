@@ -119,6 +119,38 @@ refresh_path() {
   hash -r 2>/dev/null || true
 }
 
+# The Node tarball lands in NODE_DIR, off PATH, so a later shell needs an rc line.
+# Only this layer writes one; the others resolve their own binaries at runtime.
+node_rc_file() {
+  if [ -n "${SHELL_RC:-}" ]; then printf '%s\n' "$SHELL_RC"; return 0; fi
+  case "${SHELL##*/}" in
+    zsh)  printf '%s\n' "$HOME/.zshrc" ;;
+    bash) printf '%s\n' "$HOME/.bashrc" ;;
+    *)    printf '%s\n' "$HOME/.profile" ;;
+  esac
+}
+
+node_path_line() {
+  printf 'export PATH="%s/bin:$PATH"\n' "$NODE_DIR"
+}
+
+add_node_to_rc() {
+  local rc line
+  rc="$(node_rc_file)"
+  line="$(node_path_line)"
+  if [ -f "$rc" ] && grep -Fqx "$line" "$rc"; then
+    ok "Node is already on PATH for new shells via $rc"
+    return 0
+  fi
+  if [ -w "$rc" ] || { [ ! -e "$rc" ] && [ -w "$(dirname "$rc")" ]; }; then
+    printf '\n# Added by the Triad installer, so a new shell finds the dashboard Node.\n%s\n' "$line" >>"$rc"
+    ok "Node is on PATH for new shells via $rc"
+    return 0
+  fi
+  warn "could not write $rc; add this line yourself:"
+  warn "  $line"
+}
+
 pkg_install() {  # name-on-pypi
   local pkg="$1"
   if have uv; then
@@ -622,6 +654,9 @@ ensure_node() {
   mv "$NODE_DIR.new" "$NODE_DIR"
   rm -rf "$tmp"
   refresh_path
+  # Only an install needs this: the tarball is not in ~/.local/bin, so without it
+  # every later shell is left without the node this step just put in NODE_DIR.
+  add_node_to_rc
   if have node; then
     ok "node installed ($(node --version 2>/dev/null))"
   else

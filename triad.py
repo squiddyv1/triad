@@ -700,9 +700,15 @@ def cmd_tui(args):
         _err("the dashboard's dependencies are not installed yet")
         print("     run ./install.sh (it installs Node and the dashboard; --no-tui skips it)")
         return 1
-    node = shutil.which("node")
+    node = _node_bin()
     if not node:
-        _err("node is not on PATH; the dashboard needs Node 18 or newer")
+        _err("node was not found; the dashboard needs Node 18 or newer")
+        print("     run ./install.sh (it installs Node and writes it to your shell rc; --no-tui skips it)")
+        return 1
+    version = _node_version(node)
+    major = _node_major(version)
+    if major is None or major < 18:
+        _err(f"node {version or 'unknown'} at {node} is older than 18; the dashboard needs 18 or newer")
         return 1
     cmd = [node, "--import", "tsx/esm", str(tui / "src" / "index.tsx")]
     if getattr(args, "interval", None):
@@ -1416,6 +1422,33 @@ def _uv_bin():
         if candidate and Path(candidate).is_file():
             return candidate
     return None
+
+
+def _node_bin():
+    node_dir = os.environ.get("NODE_DIR") or str(Path.home() / ".local" / "opt" / "node")
+    for candidate in (shutil.which("node"),
+                      str(Path(node_dir) / "bin" / "node"),
+                      str(Path.home() / ".local" / "bin" / "node")):
+        if candidate and Path(candidate).is_file():
+            return candidate
+    return None
+
+
+def _node_version(node):
+    try:
+        out = subprocess.run([node, "--version"], stdout=subprocess.PIPE,
+                             stderr=subprocess.DEVNULL, text=True, check=False)
+    except OSError:
+        return None
+    return out.stdout.strip() or None
+
+
+def _node_major(version):
+    # The installer parses `node --version` the same way: strip the v, take the major.
+    try:
+        return int(version.lstrip("v").split(".", 1)[0])
+    except (AttributeError, ValueError):
+        return None
 
 
 def _worker_cli():

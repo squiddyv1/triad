@@ -33,6 +33,7 @@ applies the one patch this repo ships, and puts a `triad` wrapper in `~/.local/b
 `./install.sh --help` lists the flags, and `--check` reports what is installed without
 changing anything. The dashboard and its Node runtime install by default; `--no-tui`
 skips both. Hermes is only installed if you ask for it with `--with-hermes`.
+It also adds the Node it installs to your shell rc, so a fresh shell finds it.
 
 If it added you to the `docker` group, that only applies to new logins: run `newgrp docker`
 or log out and back in before going further.
