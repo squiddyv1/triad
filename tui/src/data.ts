@@ -27,6 +27,30 @@ export type RunProgress = {
           output_tokens: number | null};
 };
 
+export type AgentMessage = {
+  id: number;
+  session_id: string;
+  agent_name: string;
+  role: string | null;
+  type: string;
+  text: string;
+  tool: string | null;
+  at: string | null;
+  truncated: boolean;
+};
+
+// `progress --verbose` adds these on top of the summary RunProgress already carries.
+export type ProgressDetail = RunProgress & {
+  agents_detail?: {id: string; name: string; status: string; pending: number}[];
+  todos_detail?: {agent_id: string; agent_name: string; id: string; title: string | null;
+                  status: string | null}[];
+  findings_detail?: {title: string | null; severity: string | null}[];
+  coverage?: {summary?: unknown; gaps?: unknown[]};
+  log_tail?: string[];
+  notes_detail?: {id: string; title: string | null; agent_name: string | null}[];
+  messages?: AgentMessage[];
+};
+
 export type Project = {
   id: string;
   title: string;
@@ -79,6 +103,17 @@ export async function fetchSnapshot(): Promise<Snapshot> {
 
 export function triadCommand(args: string[]): Promise<string> {
   return runCommand(PYTHON, [TRIAD_PY, ...args]);
+}
+
+// The CLI this app shells out to, so callers that need to spawn it detached (a full
+// engagement runs for hours) get the same interpreter and script the polling path uses.
+export function triadSpawn(args: string[]): {cmd: string; args: string[]} {
+  return {cmd: PYTHON, args: [TRIAD_PY, ...args]};
+}
+
+export async function fetchProgressDetail(workdir: string, run: string): Promise<ProgressDetail> {
+  return JSON.parse(await runCommand(PYTHON, [TRIAD_PY, 'progress', '--verbose', '--json',
+    '--workdir', workdir, '--run', run, '--messages', '200']));
 }
 
 // Containers: find the ones that matter (the scan sandbox, the Cairn server), then ask

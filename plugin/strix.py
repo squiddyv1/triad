@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import sqlite3
 import subprocess
 from pathlib import Path
 
@@ -253,6 +254,191 @@ def run_progress(cwd, run_name=None) -> dict:
             "output_tokens": usage.get("output_tokens"),
         },
     }
+
+
+def _clamp(text, limit):
+    """Trim a block of text to `limit` chars, reporting whether anything was cut."""
+    if text is None:
+        return "", False
+    if not isinstance(text, str):
+        text = json.dumps(text, default=str)
+    text = text.strip()
+    if len(text) > limit:
+        return text[:limit], True
+    return text, False
+
+
+def _content_text(content):
+    """Flatten assistant content into plain text.
+
+    Strix stores this three ways depending on the row: a list of blocks with a `text`
+    key, a bare string, or a string that is itself JSON of the blocks.
+    """
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        stripped = content.strip()
+        if stripped[:1] in ("[", "{"):
+            try:
+                return _content_text(json.loads(stripped))
+            except ValueError:
+                return content
+        return content
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, dict) and isinstance(block.get("text"), str):
+                parts.append(block["text"])
+            elif isinstance(block, str):
+                parts.append(block)
+        return "\n".join(parts)
+    return str(content)
+
+
+def _arguments_summary(raw):
+    """A compact one-line view of a tool call's arguments, which arrive JSON-encoded."""
+    if raw is None:
+        return ""
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except ValueError:
+            return raw
+    if isinstance(raw, dict):
+        return ", ".join(f"{k}={json.dumps(v, default=str) if isinstance(v, (dict, list)) else v}"
+                         for k, v in raw.items())
+    return json.dumps(raw, default=str)
+
+
+def _read_messages(state_dir, names, limit):
+    """The run's verbose agent stream, oldest first, from its own agents.db.
+
+    Read read-only and defensively: a scan mid-write, or before its first row lands, must
+    yield no messages rather than break the progress call that the dashboard polls.
+    """
+    limit = max(0, int(limit or 0))
+    if limit == 0:
+        return []
+    db = Path(state_dir) / "agents.db"
+    if not db.is_file():
+        return []
+    try:
+        con = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=1.0)
+        try:
+            rows = con.execute(
+                "select id, session_id, message_data, created_at from agent_messages "
+                "order by id desc limit ?", (limit,)).fetchall()
+        finally:
+            con.close()
+    except sqlite3.Error:
+        return []
+
+    out = []
+    for mid, sid, raw, at in reversed(rows):
+        try:
+            data = json.loads(raw)
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        mtype = data.get("type") or "message"
+        entry = {"id": mid, "session_id": sid, "agent_name": names.get(sid, sid),
+                 "role": data.get("role"), "type": mtype, "text": "", "tool": None,
+                 "at": at, "truncated": False}
+        if mtype == "function_call":
+            entry["tool"] = data.get("name")
+            entry["text"], entry["truncated"] = _clamp(_arguments_summary(data.get("arguments")), 1500)
+        elif mtype == "function_call_output":
+            entry["text"], entry["truncated"] = _clamp(data.get("output"), 800)
+        elif mtype == "reasoning":
+            entry["text"], entry["truncated"] = _clamp(
+                _content_text(data.get("summary") or data.get("text")), 1500)
+        else:
+            entry["text"], entry["truncated"] = _clamp(_content_text(data.get("content")), 1500)
+        out.append(entry)
+    return out
+
+
+def run_progress_detail(cwd, run_name=None, log_lines=200, messages=200) -> dict:
+    """run_progress plus the detail a human wants: agents, todos, findings, coverage,
+    notes and the log tail.
+
+    The summary keys keep their order and shape; every extra key is appended, so callers
+    polling the plain summary see no change.
+    """
+    out = run_progress(cwd, run_name)
+    run_dir = Path(out["dir"])
+    state = run_dir / ".state"
+
+    meta = _read_json(run_dir / "run.json", {})
+    meta = meta if isinstance(meta, dict) else {}
+
+    agents = _read_json(state / "agents.json", {})
+    agents = agents if isinstance(agents, dict) else {}
+    names = agents.get("names") or {}
+    pending_counts = agents.get("pending_counts") or {}
+    out["agents_detail"] = [
+        {"id": aid, "name": names.get(aid, aid), "status": status,
+         "pending": pending_counts.get(aid, 0)}
+        for aid, status in (agents.get("statuses") or {}).items()
+    ]
+
+    todos = _read_json(state / "todos.json", {})
+    todos = todos if isinstance(todos, dict) else {}
+    out["todos_detail"] = [
+        {"agent_id": aid, "agent_name": names.get(aid, aid), "id": tid,
+         "title": todo.get("title"), "status": todo.get("status")}
+        for aid, per in todos.items()
+        for tid, todo in (per or {}).items() if isinstance(todo, dict)
+    ]
+
+    # A missing threat-model file means "not applicable", not "zero", so only report a
+    # count when the file actually parsed.
+    threat = _read_json(state / "threat_models.json", None)
+    if isinstance(threat, (dict, list)):
+        out["threat_models"] = len(threat)
+
+    vulns = _read_json(run_dir / "vulnerabilities.json", None)
+    if isinstance(vulns, dict):
+        vulns = vulns.get("vulnerabilities") or vulns.get("findings")
+    if not isinstance(vulns, list) or not vulns:
+        for key in ("findings", "vulnerabilities", "results"):
+            if isinstance(meta.get(key), list) and meta[key]:
+                vulns = meta[key]
+                break
+    out["findings_detail"] = [
+        {"title": f.get("title") if isinstance(f, dict) else str(f),
+         "severity": f.get("severity") if isinstance(f, dict) else None}
+        for f in (vulns if isinstance(vulns, list) else [])
+    ]
+
+    # Coverage is split across two files: the summary is Strix's own, the gaps land in
+    # run.json. Report the key only when at least one half exists.
+    coverage = {}
+    cov = _read_json(run_dir / "coverage.json", {})
+    if isinstance(cov, dict) and cov.get("summary"):
+        coverage["summary"] = cov["summary"]
+    if "coverage_gaps" in meta and isinstance(meta["coverage_gaps"], list):
+        coverage["gaps"] = meta["coverage_gaps"]
+    if coverage:
+        out["coverage"] = coverage
+
+    try:
+        lines = (run_dir / "strix.log").read_text(encoding="utf-8", errors="replace").splitlines()
+        out["log_tail"] = lines[-log_lines:] if log_lines and log_lines > 0 else []
+    except OSError:
+        out["log_tail"] = []
+
+    notes = _read_json(state / "notes.json", {})
+    notes = notes if isinstance(notes, dict) else {}
+    notes_detail = [
+        {"id": nid, "title": n.get("title"), "agent_name": n.get("agent_name")}
+        for nid, n in notes.items() if isinstance(n, dict)
+    ]
+    if notes_detail:
+        out["notes_detail"] = notes_detail
+    out["messages"] = _read_messages(state, names, messages)
+    return out
 
 
 def fix_viewer_config() -> str | None:

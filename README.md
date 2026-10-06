@@ -118,6 +118,11 @@ and its graph, `p` pauses or resumes it, `s` stops it, `d` deletes it after aski
 feeds the run into its project again. A scan whose process is gone reads `stale` rather
 than `running`, because run.json keeps saying running after a kill.
 
+`n` opens a new-engagement form and starts either a scan or the full engage flow from the
+dashboard. `enter` on the STRIX pane opens the selected run's verbose progress: its own
+agent message stream first, then agents and todos with status, findings, coverage, usage,
+and the tail of `strix.log`.
+
 The installer sets up Node 18 or newer and the dashboard's dependencies by default, so
 `triad tui` works after a fresh install; `--no-tui` skips both. A dashboard install that
 fails is reported but does not stop the rest of the install, so the CLI still works

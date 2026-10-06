@@ -472,19 +472,86 @@ def _progress_line(p):
             f"requests {u['requests']}")
 
 
+def _message_line(m):
+    """One compact line for a verbose stream entry, so a long run still reads."""
+    kind = {"function_call": f"call {m.get('tool') or '?'}",
+            "function_call_output": "result"}.get(m.get("type"), m.get("type"))
+    who = m.get("agent_name") or m.get("session_id") or "?"
+    text = " ".join((m.get("text") or "").split())
+    if len(text) > 160:
+        text = text[:159] + "…"
+    stamp = (m.get("at") or "")[11:19]
+    return f"  {stamp} {str(kind):<18} {who}: {text}"
+
+
+def _print_progress_detail(p):
+    """The verbose human view: the agent stream first, then the run's other state."""
+    print(f"{p['run']}  {p['status']}  {_elapsed(p['start_time'], p['end_time'])}")
+    print(f"  {_progress_line(p)}")
+
+    messages = p.get("messages") or []
+    print(f"\nmessages ({len(messages)})")
+    if not messages:
+        print("  (none yet)")
+    for m in messages:
+        print(_message_line(m))
+
+    print("\nagents")
+    for a in p.get("agents_detail") or []:
+        pending = f"  pending {a['pending']}" if a.get("pending") else ""
+        print(f"  {a['status']:<10} {a['name']}{pending}")
+
+    if p.get("todos_detail") is not None:
+        print("\ntodos")
+        for t in p["todos_detail"]:
+            print(f"  {t['status']:<11} {t['title']}  ({t['agent_name']})")
+
+    if p.get("findings_detail"):
+        print("\nfindings")
+        for f in p["findings_detail"]:
+            print(f"  [{f['severity']}] {f['title']}")
+
+    if p.get("coverage") is not None:
+        cov = p["coverage"]
+        print("\ncoverage")
+        if cov.get("summary") is not None:
+            print(f"  summary: {json.dumps(cov['summary'], default=str)[:240]}")
+        if "gaps" in cov:
+            print(f"  gaps: {len(cov['gaps'])}")
+
+    if p.get("notes_detail"):
+        print("\nnotes")
+        for n in p["notes_detail"]:
+            print(f"  {n['title']}  ({n['agent_name']})")
+
+    tail = p.get("log_tail") or []
+    print(f"\nlog tail ({len(tail)} lines)")
+    for line in tail:
+        print(f"  {line}")
+
+
 def cmd_progress(args):
     """How far along a scan is, from the state Strix writes while it runs.
 
     A headless scan prints nothing, so this reads the same files its own viewer does.
     """
     workdir = _strix_workdir(args)
+    verbose = getattr(args, "verbose", False)
     try:
-        p = strix.run_progress(workdir, getattr(args, "run", None))
+        if verbose:
+            p = strix.run_progress_detail(workdir, getattr(args, "run", None),
+                                          log_lines=getattr(args, "log_lines", 200),
+                                          messages=getattr(args, "messages", 200))
+        else:
+            p = strix.run_progress(workdir, getattr(args, "run", None))
     except FileNotFoundError as e:
         print(f"  {e}")
         return 1
     if args.json:
         print(json.dumps(p, indent=2))
+        return 0
+    if verbose:
+        _print_progress_detail(p)
         return 0
 
     print(f"{p['run']}  {p['status']}  {_elapsed(p['start_time'], p['end_time'])}")
@@ -2548,6 +2615,12 @@ def main(argv=None):
     pg.add_argument("-f", "--follow", action="store_true",
                     help="keep printing until the run stops")
     pg.add_argument("--interval", type=int, default=15, help="seconds between updates")
+    pg.add_argument("--verbose", action="store_true",
+                    help="include the agent stream, agents, todos, findings, coverage and log")
+    pg.add_argument("--log-lines", type=int, default=200,
+                    help="lines of strix.log to include with --verbose (default 200)")
+    pg.add_argument("--messages", type=int, default=200,
+                    help="most recent agent messages to include with --verbose (default 200)")
     pg.add_argument("--json", action="store_true")
     pg.set_defaults(func=cmd_progress)
 

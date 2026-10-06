@@ -325,6 +325,12 @@ fallback, so scans started before that or by another tool are still controllable
 feed writes the project id into `<workdir>/.triad-project`, which is what pairs a run with
 its graph.
 
+`n` opens a new-engagement form that starts a scan or the full engage flow without leaving
+the dashboard. `enter` on the STRIX pane opens a verbose view of the selected run built on
+`triad progress --verbose --json`: the run's own agent message stream from `.state/agents.db`
+first, then agents and todos with status, findings, coverage, usage and cost, and the
+`strix.log` tail last, refetched on the same interval.
+
 `install.sh` installs Node 18 or newer from the official prebuilt tarball (no root, no
 distro package) and the app's dependencies by default, so `triad tui` works after a fresh
 install; `--no-tui` skips both, and `NODE_INSTALL_METHOD` / `TUI_INSTALL_METHOD` downgrade
