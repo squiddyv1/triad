@@ -178,6 +178,93 @@ def read_run(cwd, run_name=None) -> dict:
     return out
 
 
+def _read_json(path, default):
+    try:
+        return json.loads(Path(path).read_text())
+    except (OSError, ValueError):
+        return default
+
+
+def run_progress(cwd, run_name=None) -> dict:
+    """How far along a run is: agents, todos, notes and usage, from Strix's own state.
+
+    These are the files Strix's viewer reads, so this is the terminal equivalent and it
+    works while the scan is still writing them.
+    """
+    run = read_run(cwd, run_name)
+    run_dir = Path(run["run_dir"])
+    meta = _read_json(run_dir / "run.json", {})
+    usage = meta.get("llm_usage") or {}
+    agents = _read_json(run_dir / ".state" / "agents.json", {})
+    todos = _read_json(run_dir / ".state" / "todos.json", {})
+    notes = _read_json(run_dir / ".state" / "notes.json", {})
+
+    by_status = agents.get("statuses") or {}
+    names = agents.get("names") or {}
+    todo_statuses = [t.get("status") for per in (todos or {}).values()
+                     for t in (per or {}).values()]
+    details = usage.get("input_tokens_details") or [{}]
+    findings = run["vulnerabilities_count"]
+    return {
+        "run": run["run"],
+        "dir": run["run_dir"],
+        "status": run["status"],
+        "start_time": meta.get("start_time"),
+        "end_time": meta.get("end_time"),
+        "turns": run["turns"],
+        "cost_usd": run["cost_usd"],
+        "findings": findings if findings is not None else len(run["findings"]),
+        "coverage_gaps": len(run["coverage_gaps"]),
+        "agents": {
+            "total": len(by_status),
+            "completed": sum(1 for s in by_status.values() if s == "completed"),
+            "running": [names.get(a, a) for a, s in by_status.items() if s == "running"],
+            "waiting": sum(1 for s in by_status.values() if s == "waiting"),
+            "failed": sum(1 for s in by_status.values() if s in ("failed", "error")),
+            "names": list(names.values()),
+        },
+        "todos": {
+            "total": len(todo_statuses),
+            "done": todo_statuses.count("done"),
+            "in_progress": todo_statuses.count("in_progress"),
+            "pending": todo_statuses.count("pending"),
+        },
+        "notes": len(notes or {}),
+        "usage": {
+            "requests": usage.get("requests"),
+            "input_tokens": usage.get("input_tokens"),
+            "cached_tokens": details[0].get("cached_tokens") if details else None,
+            "output_tokens": usage.get("output_tokens"),
+        },
+    }
+
+
+def fix_viewer_config() -> str | None:
+    """Make Strix's own config loadable, so `strix view` can start.
+
+    Strix persists LLM_EXTRA_HEADERS as a JSON string, but types that field as a dict, so
+    its settings model rejects the file and the viewer dies before serving anything. The
+    scan path tolerates it; the viewer does not. Rewrite the value as an object when it is
+    a string, and report it, so the change is never silent.
+    """
+    path = Path.home() / ".strix" / "cli-config.json"
+    try:
+        cfg = json.loads(path.read_text())
+        raw = (cfg.get("env") or {}).get("LLM_EXTRA_HEADERS")
+    except (OSError, ValueError, AttributeError):
+        return None
+    if not isinstance(raw, str):
+        return None
+    try:
+        cfg["env"]["LLM_EXTRA_HEADERS"] = json.loads(raw)
+    except ValueError:
+        return None
+    path.write_text(json.dumps(cfg, indent=2) + "\n")
+    path.chmod(0o600)
+    return (f"rewrote LLM_EXTRA_HEADERS in {path} as an object "
+            "(Strix writes it as a string, which its own settings model rejects)")
+
+
 def _sarif_location(res: dict) -> str:
     try:
         loc = res["locations"][0]["physicalLocation"]

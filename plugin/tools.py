@@ -120,6 +120,13 @@ def strix_findings(args: dict, **kwargs) -> str:
         return _err(e)
 
 
+def strix_progress(args: dict, **kwargs) -> str:
+    try:
+        return _ok(**strix.run_progress(_workdir(args), args.get("run_name")))
+    except Exception as e:
+        return _err(e)
+
+
 def triad_feed(args: dict, **kwargs) -> str:
     try:
         run = strix.read_run(_workdir(args), args.get("run_name"))

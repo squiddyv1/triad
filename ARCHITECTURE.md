@@ -277,7 +277,31 @@ That backend never needs `opencode auth login`: the key is written straight into
 `~/.local/share/opencode/auth.json` (mode 600) and merged rather than replaced, and
 `triad auth` rewrites it from `.env`.
 
-### 4.6 Not built yet
+### 4.6 Watching a scan
+
+A headless run prints nothing, and `docker logs` on the sandbox shows only the sandbox's own
+setup (proxy, CA trust, "Container ready"), so progress has to come from the files Strix
+writes while it works. `triad progress` reads those: agents and their status, todos done and
+pending, notes written, findings so far, requests and tokens. `-f` repeats it until the run
+stops.
+
+`triad view` opens Strix's own dashboard for a live or finished run: agent graph, per-agent
+state, coverage, threat models, findings, token cost, and a prompt composer that can steer
+the running scan. Two things matter. The URL it prints carries a token that authorizes
+steering the run, so it is not a link to share. And the viewer needs
+`~/.strix/cli-config.json` to load: Strix writes `LLM_EXTRA_HEADERS` there as a JSON string
+while typing the field as a dict, so its settings model rejects the file and the viewer dies
+before serving anything, though the scan path tolerates it. `triad view` rewrites that value
+as an object first and says so when it does.
+
+To look inside the sandbox mid-run, find it by image rather than by name (the name is
+random): `docker ps -q --filter ancestor=ghcr.io/usestrix/strix-sandbox:1.3.0`, then
+`docker exec -it <id> sh`. The agent's work lands in `/workspace`, as user `pentester`.
+
+Exhausting `--max-turns` marks the run `failed` (`MaxTurnsExceeded`) even when it produced
+findings, so read the artifacts and the log rather than the status field alone.
+
+### 4.7 Not built yet
 
 The controls the design asks for but this repo does not implement: an egress proxy with
 an allowlist generated from the scope file, a denylist of destructive actions enforced in

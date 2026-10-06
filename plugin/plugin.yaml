@@ -21,6 +21,7 @@ provides_tools:
   - cairn_status
   - strix_scan
   - strix_findings
+  - strix_progress
   - triad_feed
 provides_hooks:
   - post_tool_call

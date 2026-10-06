@@ -30,6 +30,7 @@ import types
 import urllib.error
 import urllib.request
 import uuid
+from datetime import datetime
 from pathlib import Path
 
 
@@ -100,17 +101,50 @@ def _slug(text, fallback="engagement"):
     return cleaned[:48] or fallback
 
 
-def _engage_workdir(args):
-    """Where this engagement's Strix run and artifacts live.
-
-    Defaults under TRIAD_WORKDIR (set by the installed wrapper and by .env) so the
-    layout matches what the docs and the plugin already assume.
-    """
+def _strix_workdir(args):
+    """Where strix_runs/ lives: --workdir, else TRIAD_WORKDIR, else ~/engagements."""
     if getattr(args, "workdir", None):
         return Path(args.workdir).expanduser().resolve()
     base = (os.environ.get("TRIAD_WORKDIR") or _env_read().get("TRIAD_WORKDIR")
             or strix.DEFAULT_WORKDIR)
-    return (Path(base).expanduser() / _slug(getattr(args, "title", ""))).resolve()
+    return Path(base).expanduser().resolve()
+
+
+def _engage_workdir(args):
+    """One engagement's own directory, under the Strix workdir.
+
+    The wrapper and .env both set TRIAD_WORKDIR, so the layout matches what the docs and
+    the plugin already assume.
+    """
+    if getattr(args, "workdir", None):
+        return Path(args.workdir).expanduser().resolve()
+    return (_strix_workdir(args) / _slug(getattr(args, "title", ""))).resolve()
+
+
+def _short(n):
+    """18.2M, 279k, 812: token counts read at a glance."""
+    if n is None:
+        return "-"
+    for unit, size in (("B", 1_000_000_000), ("M", 1_000_000), ("k", 1_000)):
+        if n >= size:
+            return f"{n / size:.1f}{unit}".replace(".0" + unit, unit)
+    return str(n)
+
+
+def _elapsed(start, end=None):
+    """How long a run has been going, or how long it took."""
+    if not start:
+        return "-"
+    try:
+        began = datetime.fromisoformat(start)
+        if end:
+            stopped = datetime.fromisoformat(end)
+        else:
+            stopped = datetime.now(tz=began.tzinfo) if began.tzinfo else datetime.now()
+    except (ValueError, TypeError):
+        return "-"
+    minutes = int((stopped - began).total_seconds() // 60)
+    return f"{minutes // 60}h{minutes % 60:02d}m" if minutes >= 60 else f"{minutes}m"
 
 
 def _feed_run(c, project, workdir, run_id=None, anchor="origin"):
@@ -242,7 +276,7 @@ def cmd_scan(args):
     print(f"strix started pid={res['pid']} in {res['cwd']}")
     print(f"  cmd: {' '.join(res['cmd'])}")
     if not args.wait:
-        print("  (not waiting; poll with: triad.py findings --workdir ...)")
+        print("  (not waiting; watch it with: triad progress, or triad view for the dashboard)")
         return 0
     print("  waiting for the run directory to appear and settle...")
     run_dir = _wait_for_run(workdir, timeout=args.wait_timeout)
@@ -282,6 +316,79 @@ def cmd_findings(args):
     for g in run["coverage_gaps"]:
         print(f"  [gap] {g.get('message') or g.get('rule')}")
     return 0
+
+
+def _progress_line(p):
+    """One line worth of a run's progress, for `progress` and its follow loop."""
+    a, t, u = p["agents"], p["todos"], p["usage"]
+    return (f"agents {a['completed']}/{a['total']} done  todos {t['done']}/{t['total']}  "
+            f"notes {p['notes']}  findings {p['findings']}  "
+            f"tokens {_short(u['input_tokens'])}/{_short(u['output_tokens'])}  "
+            f"requests {u['requests']}")
+
+
+def cmd_progress(args):
+    """How far along a scan is, from the state Strix writes while it runs.
+
+    A headless scan prints nothing, so this reads the same files its own viewer does.
+    """
+    workdir = _strix_workdir(args)
+    try:
+        p = strix.run_progress(workdir, getattr(args, "run", None))
+    except FileNotFoundError as e:
+        print(f"  {e}")
+        return 1
+    if args.json:
+        print(json.dumps(p, indent=2))
+        return 0
+
+    print(f"{p['run']}  {p['status']}  {_elapsed(p['start_time'], p['end_time'])}")
+    print(f"  {_progress_line(p)}")
+    if p["agents"]["running"]:
+        print(f"  now: {', '.join(p['agents']['running'][:3])}")
+    if p["agents"]["failed"]:
+        print(f"  failed agents: {p['agents']['failed']}")
+    if not args.follow:
+        print(f"  live dashboard: triad view --workdir {workdir}")
+        return 0
+
+    try:
+        while p["status"] == "running":
+            time.sleep(args.interval)
+            p = strix.run_progress(workdir, getattr(args, "run", None))
+            print(f"  {time.strftime('%H:%M:%S')}  {p['status']}  {_progress_line(p)}")
+    except KeyboardInterrupt:
+        print()
+        return 0
+    print(f"  run is {p['status']}: {_elapsed(p['start_time'], p['end_time'])}")
+    return 0
+
+
+def cmd_view(args):
+    """Open Strix's own dashboard for a run, live or finished."""
+    workdir = _strix_workdir(args)
+    try:
+        run_dir = strix.resolve_run(workdir, getattr(args, "run", None))
+    except FileNotFoundError as e:
+        print(f"  {e}")
+        return 1
+    note = strix.fix_viewer_config()
+    if note:
+        print(f"  {note}")
+
+    cmd = [strix._resolve_bin(), "view", run_dir.name]
+    if args.port:
+        cmd += ["--port", str(args.port)]
+    if args.host:
+        cmd += ["--host", args.host]
+    if args.no_open:
+        cmd.append("--no-open")
+    print(f"  {run_dir.name}: starting the viewer, Ctrl-C to stop")
+    print("  the URL it prints carries a token that can steer the run: do not share it")
+    try:
+        return subprocess.call(cmd, cwd=str(workdir))
+    except KeyboardInterrupt:
+        return 0
 
 
 def cmd_feed(args):
@@ -1976,6 +2083,23 @@ def main(argv=None):
     f.add_argument("--workdir", required=True)
     f.add_argument("--run")
     f.set_defaults(func=cmd_findings)
+
+    pg = sub.add_parser("progress", help="how far along a running Strix scan is")
+    pg.add_argument("--workdir", help="engagement directory holding strix_runs/")
+    pg.add_argument("--run", help="run name (default: the most recent)")
+    pg.add_argument("-f", "--follow", action="store_true",
+                    help="keep printing until the run stops")
+    pg.add_argument("--interval", type=int, default=15, help="seconds between updates")
+    pg.add_argument("--json", action="store_true")
+    pg.set_defaults(func=cmd_progress)
+
+    vw = sub.add_parser("view", help="open Strix's live dashboard for a run")
+    vw.add_argument("--workdir", help="engagement directory holding strix_runs/")
+    vw.add_argument("--run", help="run name (default: the most recent)")
+    vw.add_argument("--port", type=int)
+    vw.add_argument("--host", help="0.0.0.0 to expose it beyond localhost")
+    vw.add_argument("--no-open", action="store_true", help="do not open a browser")
+    vw.set_defaults(func=cmd_view)
 
     fd = sub.add_parser("feed", help="post a Strix run into the Cairn graph")
     fd.add_argument("--project", required=True)

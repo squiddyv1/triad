@@ -20,6 +20,7 @@ _TOOLS = [
     ("cairn_status",  schemas.CAIRN_STATUS,  tools.cairn_status),
     ("strix_scan",    schemas.STRIX_SCAN,    tools.strix_scan),
     ("strix_findings", schemas.STRIX_FINDINGS, tools.strix_findings),
+    ("strix_progress", schemas.STRIX_PROGRESS, tools.strix_progress),
     ("triad_feed",    schemas.TRIAD_FEED,    tools.triad_feed),
 ]
 

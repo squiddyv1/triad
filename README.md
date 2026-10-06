@@ -75,6 +75,11 @@ The steps are separate commands too, for a scan that is already running or was r
 elsewhere: `triad scan`, `triad findings`, `triad feed`. Feeding twice is safe, since
 hints and intents are only ever added.
 
+A headless scan prints nothing while it works, so `triad progress` reads the state Strix
+writes as it goes: agents and their status, todos, notes, findings so far, requests and
+tokens. `triad progress -f` keeps printing until the run stops, and `triad view` opens
+Strix's own dashboard for a live or finished run.
+
 ## Commands
 
 | Command | What it does |
@@ -86,6 +91,8 @@ hints and intents are only ever added.
 | `triad status` | list projects, or read one graph with `--project` |
 | `triad engage` | the whole flow: project, scan, feed |
 | `triad scan` / `findings` / `feed` | those same steps on their own |
+| `triad progress` | how far along a running scan is, from its own state files |
+| `triad view` | open Strix's dashboard for a live or finished run |
 | `triad watch` / `report` | follow the graph, then write it up |
 | `triad auth` | rewrite the worker's credentials from `.env`; `--show` to inspect |
 

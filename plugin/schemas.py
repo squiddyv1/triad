@@ -150,6 +150,20 @@ STRIX_FINDINGS = {
     },
 }
 
+STRIX_PROGRESS = {
+    "name": "strix_progress",
+    "description": ("How far along a running Strix scan is: agents and their status, todos, "
+                    "notes, findings so far, requests and tokens. Reads the state Strix "
+                    "writes as it scans, so it answers mid-run."),
+    "parameters": {
+        "type": "object",
+        "properties": {"workdir": {"type": "string"},
+                       "run_name": {"type": "string",
+                                    "description": "Defaults to the most recent run"}},
+        "required": ["workdir"],
+    },
+}
+
 TRIAD_FEED = {
     "name": "triad_feed",
     "description": ("Bridge discovery into exploitation: take a Strix run and post its findings "
