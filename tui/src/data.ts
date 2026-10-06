@@ -15,14 +15,18 @@ export type RunProgress = {
   turns: number | null;
   cost_usd: number | null;
   findings: number;
+  findings_by_severity?: Record<string, number>;
   coverage_gaps: number;
   notes: number;
   live: boolean;
   paused: boolean;
   pid: number | null;
   project?: string | null;
+  project_fed_at?: string | null;
   agents: {total: number; completed: number; running: string[]; waiting: number; failed: number};
   todos: {total: number; done: number; in_progress: number; pending: number};
+  todos_detail?: {agent_id: string; agent_name: string; id: string; title: string | null;
+                  status: string | null}[];
   usage: {requests: number | null; input_tokens: number | null; cached_tokens: number | null;
           output_tokens: number | null};
 };

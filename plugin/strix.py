@@ -23,6 +23,9 @@ from pathlib import Path
 
 COVERAGE_RULE_PREFIX = "strix-coverage/"
 
+# The severities a finding can carry, worst first; anything else is reported as `info`.
+SEVERITY_ORDER = ("critical", "high", "medium", "low", "info")
+
 # Where a launched scan's pid is recorded, so it can be paused or stopped later.
 PID_FILE = "strix_last_launch.pid"
 
@@ -192,6 +195,16 @@ def read_run(cwd, run_name=None) -> dict:
 
     if out["findings"] and out["vulnerabilities_count"] is None:
         out["vulnerabilities_count"] = len(out["findings"])
+
+    # The dashboard wants a breakdown, not the list again. Severity is free-form in the
+    # source data, so unknown or missing values fold into `info` rather than a new bucket.
+    counts = {}
+    for finding in out["findings"]:
+        severity = str((finding or {}).get("severity") or "info").strip().lower()
+        if severity not in SEVERITY_ORDER:
+            severity = "info"
+        counts[severity] = counts.get(severity, 0) + 1
+    out["findings_by_severity"] = counts
     return out
 
 
@@ -232,6 +245,7 @@ def run_progress(cwd, run_name=None, _run=None) -> dict:
         "turns": run["turns"],
         "cost_usd": run["cost_usd"],
         "findings": findings if findings is not None else len(run["findings"]),
+        "findings_by_severity": run.get("findings_by_severity") or {},
         "coverage_gaps": len(run["coverage_gaps"]),
         "agents": {
             "total": len(by_status),

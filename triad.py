@@ -175,6 +175,19 @@ def _project_link(workdir):
     return text or None
 
 
+def _project_fed_at(workdir):
+    """When the engagement was last fed into its project, as ISO 8601.
+
+    The link file is written on every feed, so its mtime is the freshest handoff; no
+    link file means no timestamp.
+    """
+    try:
+        mtime = (Path(workdir).expanduser() / PROJECT_LINK).stat().st_mtime
+    except OSError:
+        return None
+    return datetime.fromtimestamp(mtime).astimezone().isoformat()
+
+
 def _feed_run(c, project, workdir, run_id=None, anchor="origin"):
     """Read a run and post its leads. Returns (run, hint_ids, intent_ids).
 
@@ -652,6 +665,7 @@ def _snapshot():
         state = _pid_state(pid) if pid else "gone"
         live = state in ("running", "stopped")
         project = _project_link(workdir)
+        fed_at = _project_fed_at(workdir)
         runs_dir = workdir / "strix_runs"
         if not runs_dir.is_dir():
             continue
@@ -665,6 +679,8 @@ def _snapshot():
             progress.update({"workdir": str(workdir), "live": current, "project": project,
                              "pid": pid if current else None,
                              "paused": current and state == "stopped"})
+            if fed_at:
+                progress["project_fed_at"] = fed_at
             runs.append(progress)
 
     dispatcher = _pid_alive(DISPATCH_PID)

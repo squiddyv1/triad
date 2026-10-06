@@ -5,7 +5,7 @@
 // view and the new-engagement form are the two modal states over that list.
 import React, {useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import {Box, Text, render, useApp, useInput} from 'ink';
-import {existsSync} from 'node:fs';
+import {existsSync, readFileSync} from 'node:fs';
 import {join} from 'node:path';
 import {
   cpuPercent, elapsed, fetchContainerMetrics, fetchProgressDetail, fetchSnapshot, human, humanKb,
@@ -73,6 +73,58 @@ function agentColour(name: string): string {
 
 function severityColour(severity: string | null | undefined): string {
   return SEVERITY_COLOUR[String(severity ?? '').toLowerCase()] ?? 'gray';
+}
+
+// The order the breakdown is read in: worst first, so a critical never hides behind an info.
+const SEVERITY_ORDER = ['critical', 'high', 'medium', 'low', 'info'];
+
+const SPARK_GLYPHS = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+
+// Blocks scaled to the window's min..max. A flat or single-sample window is a flat line,
+// not noise, so a steady figure reads as steady instead of jittering at full height.
+function sparkline(values: number[]): string {
+  if (!values.length) return '';
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const span = max - min;
+  return values
+    .map(v => SPARK_GLYPHS[span > 0 ? Math.round(((v - min) / span) * (SPARK_GLYPHS.length - 1)) : 0])
+    .join('');
+}
+
+// Fixed width so a filling bar never reflows the line.
+function progressBar(done: number, total: number, width = 10): string {
+  const filled = total <= 0 ? 0 : Math.max(0, Math.min(width, Math.round((done / total) * width)));
+  return '█'.repeat(filled) + '░'.repeat(width - filled);
+}
+
+function barColour(done: number, total: number, working: boolean): string | undefined {
+  if (total > 0 && done >= total) return 'green';
+  return working ? 'cyan' : undefined;
+}
+
+function parsePercent(text: string): number | null {
+  const match = /([\d.]+)/.exec(text);
+  return match ? Number(match[1]) : null;
+}
+
+// Paths in the pane are read, not copied, so the home prefix is noise: collapse it.
+function tilde(path: string): string {
+  const home = process.env.HOME;
+  return home && path.startsWith(home) ? `~${path.slice(home.length)}` : path;
+}
+
+function relativeAge(iso: string | null | undefined): string {
+  if (!iso) return '-';
+  const at = Date.parse(iso);
+  if (Number.isNaN(at)) return '-';
+  const seconds = Math.max(0, Math.floor((Date.now() - at) / 1000));
+  if (seconds < 60) return `${seconds}s ago`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes} min ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h${String(minutes % 60).padStart(2, '0')}m ago`;
+  return `${Math.floor(hours / 24)}d ago`;
 }
 
 function Spinner({frame, color}: {frame: number; color?: string}) {
@@ -247,26 +299,132 @@ function Row({run, selected, frame}: {run: RunProgress; selected: boolean; frame
   );
 }
 
+// One row per label: the label column is fixed and the value is truncated to the pane, so a
+// long value can never wrap and push the blocks below it down.
 function Line({label, children}: {label: string; children: React.ReactNode}) {
   return (
-    <Box>
+    <Text wrap="truncate-end">
       <Text dimColor>{label.padEnd(11)}</Text>
       {children}
-    </Box>
+    </Text>
   );
 }
 
-function Detail({run, project, focus, metrics}: {
+type DetailMetrics = {
+  sandbox: string; sandboxCpu: number | null;
+  strix: string; strixCpu: number | null; strixMemKb: number | null;
+  dispatcher: string;
+};
+
+type DetailProject = {id: string; title: string; status: string; facts: number; hints: number;
+                      intents: number; open: number; unclaimed: number; working: number};
+
+function Detail({run, project, focus, metrics, poll, dispatcherAlive}: {
   run: RunProgress | null;
-  project: {id: string; title: string; status: string; facts: number; hints: number;
-            intents: number; open: number} | null;
+  project: DetailProject | null;
   focus: Focus;
-  metrics: {sandbox: string; strix: string; dispatcher: string};
+  metrics: DetailMetrics;
+  poll: number;
+  dispatcherAlive: boolean;
 }) {
   if (!run) {
     return <Box paddingLeft={2}><Text dimColor>no runs yet — start one with `triad engage`</Text></Box>;
   }
+  return <DetailBody run={run} project={project} focus={focus} metrics={metrics}
+                     poll={poll} dispatcherAlive={dispatcherAlive} />;
+}
+
+// Counts the findings a vulnerabilities.json carries, or null when it is absent or unreadable.
+// The tick already says the file is there; this only adds the number when it parses.
+function readFindingCount(path: string): number | null {
+  try {
+    const data = JSON.parse(readFileSync(path, 'utf8'));
+    const list = Array.isArray(data) ? data
+      : Array.isArray(data?.vulnerabilities) ? data.vulnerabilities
+      : Array.isArray(data?.findings) ? data.findings
+      : null;
+    return list ? list.length : null;
+  } catch {
+    return null;
+  }
+}
+
+function DetailBody({run, project, focus, metrics, poll, dispatcherAlive}: {
+  run: RunProgress;
+  project: DetailProject | null;
+  focus: Focus;
+  metrics: DetailMetrics;
+  poll: number;
+  dispatcherAlive: boolean;
+}) {
   const runFocus = focus === 'run';
+
+  // Histories live per selected run, keyed by dir, so a selection change starts a fresh line
+  // instead of drawing one run's samples under another's name. Advanced once per poll.
+  const hist = useRef({dir: null as string | null, sandbox: [] as number[], scan: [] as number[],
+                       mem: [] as number[]});
+  const usage = useRef<{dir: string; total: number; at: number} | null>(null);
+  const [tokenRate, setTokenRate] = useState<number | null>(null);
+  const [, setSampleCount] = useState(0);
+
+  useEffect(() => {
+    if (poll < 0) return;  // the snapshot-only half of the first refresh; metrics not in yet
+    if (hist.current.dir !== run.dir) {
+      hist.current = {dir: run.dir, sandbox: [], scan: [], mem: []};
+    }
+    const buf = hist.current;
+    if (metrics.sandboxCpu !== null) buf.sandbox = [...buf.sandbox, metrics.sandboxCpu].slice(-30);
+    if (metrics.strixCpu !== null) buf.scan = [...buf.scan, metrics.strixCpu].slice(-30);
+    if (metrics.strixMemKb !== null) buf.mem = [...buf.mem, metrics.strixMemKb].slice(-30);
+
+    const total = (run.usage.input_tokens ?? 0) + (run.usage.output_tokens ?? 0);
+    const previous = usage.current;
+    if (previous && previous.dir === run.dir) {
+      const minutes = (Date.now() - previous.at) / 60000;
+      setTokenRate(minutes > 0 ? (total - previous.total) / minutes : null);
+    } else {
+      setTokenRate(null);  // first poll: `-`, rather than a number invented from nothing
+    }
+    usage.current = {dir: run.dir, total, at: Date.now()};
+    setSampleCount(n => n + 1);
+    // Deliberately keyed on the poll and the run, not on metrics/usage identity: the buffers
+    // must advance exactly once per snapshot, not once per render (the frame ticker re-renders).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [poll, run.dir]);
+
+  const artifacts = useMemo(() => {
+    const vulnPath = run.dir ? join(run.dir, 'vulnerabilities.json') : '';
+    return {
+      report: Boolean(run.workdir && existsSync(join(run.workdir, 'report.md'))),
+      vulns: Boolean(vulnPath && existsSync(vulnPath)),
+      vulnsCount: vulnPath ? readFindingCount(vulnPath) : null,
+      sarif: Boolean(run.dir && existsSync(join(run.dir, 'findings.sarif'))),
+      coverage: Boolean(run.dir && existsSync(join(run.dir, 'coverage.json'))),
+    };
+    // Re-checked once per poll so four stats never run on the frame ticker.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [run.dir, run.workdir, poll]);
+
+  const severity = run.findings_by_severity ?? {};
+  const severityParts: React.ReactNode[] = [];
+  for (const name of SEVERITY_ORDER) {
+    const count = severity[name] ?? 0;
+    if (!count) continue;
+    if (severityParts.length) severityParts.push(<Text key={`sep-${name}`} dimColor> · </Text>);
+    severityParts.push(<Text key={name} color={severityColour(name)}>{name} {count}</Text>);
+  }
+
+  const live = run.live && !run.paused;
+  const agentsWorking = run.agents.running.length > 0 && live;
+  const agentsColour = barColour(run.agents.completed, run.agents.total, agentsWorking);
+  const todosWorking = run.todos.in_progress > 0 && live;
+  const todosColour = barColour(run.todos.done, run.todos.total, todosWorking);
+  const inProgress = (run.todos_detail ?? []).filter(t => t.status === 'in_progress').slice(0, 3);
+
+  const tick = (on: boolean) => (
+    <Text color={on ? 'green' : undefined} dimColor={!on}>{on ? '✓' : '✗'}</Text>
+  );
+
   return (
     <Box flexDirection="column" paddingLeft={1}>
       <Text bold color={runFocus ? 'cyan' : undefined}>
@@ -277,27 +435,54 @@ function Detail({run, project, focus, metrics}: {
         <Text color={STATE_COLOUR[stateOf(run)] ?? 'gray'}>{stateOf(run)}</Text>
         <Text dimColor>  {elapsed(run.start_time, run.end_time)}  pid {run.pid ?? '-'}</Text>
       </Line>
-      <Line label="findings">
-        <Text color={run.findings > 0 ? 'green' : 'gray'}>{run.findings}</Text>
-        <Text dimColor>  gaps {run.coverage_gaps}  notes {run.notes}</Text>
-      </Line>
       <Line label="agents">
-        <Text>{run.agents.completed}/{run.agents.total} done</Text>
+        <Text color={agentsColour} dimColor={!agentsColour}>
+          [{progressBar(run.agents.completed, run.agents.total)}] {run.agents.completed}/{run.agents.total} done
+        </Text>
         <Text dimColor>
           {run.agents.running.length > 0 ? `  ${run.agents.running.length} working` : ''}
           {run.agents.failed > 0 ? `  ${run.agents.failed} failed` : ''}
         </Text>
       </Line>
       <Line label="todos">
-        <Text>{run.todos.done}/{run.todos.total} done</Text>
+        <Text color={todosColour} dimColor={!todosColour}>
+          [{progressBar(run.todos.done, run.todos.total)}] {run.todos.done}/{run.todos.total} done
+        </Text>
         <Text dimColor>  {run.todos.in_progress} in progress</Text>
+      </Line>
+      <Line label="findings">
+        <Text color={run.findings > 0 ? 'green' : 'gray'}>{run.findings}</Text>
+        <Text dimColor>  gaps {run.coverage_gaps}  notes {run.notes}</Text>
+      </Line>
+      <Line label="">
+        {severityParts.length > 0 ? severityParts : <Text dimColor>no findings</Text>}
       </Line>
       <Line label="tokens">
         <Text>{human(run.usage.input_tokens)} in / {human(run.usage.output_tokens)} out</Text>
         <Text dimColor>  {run.usage.requests ?? '-'} requests</Text>
+        <Text dimColor>  rate {tokenRate === null ? '-' : `${human(Math.round(tokenRate))} tok/min`}</Text>
       </Line>
-      {run.agents.running.length > 0 && (
-        <Line label="now"><Text color="cyan">{run.agents.running.slice(0, 2).join(', ')}</Text></Line>
+      <Line label="cost">
+        {run.cost_usd === null ? (
+          <Text dimColor>not reported</Text>
+        ) : (
+          <>
+            <Text>${run.cost_usd.toFixed(4)}</Text>
+            {run.turns ? <Text dimColor>  ${(run.cost_usd / run.turns).toFixed(4)}/turn</Text> : null}
+          </>
+        )}
+      </Line>
+      {(run.agents.running.length > 0 || inProgress.length > 0) && (
+        <>
+          <Line label="now">
+            {run.agents.running.length > 0
+              ? <Text color="cyan">{run.agents.running.slice(0, 3).join(', ')}</Text>
+              : <Text dimColor>no agents running</Text>}
+          </Line>
+          {inProgress.map(t => (
+            <Line key={t.id} label=""><Text dimColor>· {t.title ?? t.id}</Text></Line>
+          ))}
+        </>
       )}
 
       <Box marginTop={1}>
@@ -312,18 +497,57 @@ function Detail({run, project, focus, metrics}: {
             <Text color={project.status === 'active' ? 'green' : 'yellow'}>  {project.status}</Text>
           </Line>
           <Line label="graph">
-            <Text>{project.facts} facts  {project.hints} hints  {project.intents} intents</Text>
-            <Text dimColor>  {project.open} open</Text>
+            <Text>
+              {project.facts} facts · {project.hints} hints · {project.intents} intents · {project.open} open
+            </Text>
+          </Line>
+          <Line label="fed">
+            <Text>{relativeAge(run.project_fed_at)}</Text>
+          </Line>
+          <Line label="dispatcher">
+            {dispatcherAlive
+              ? <Text dimColor>up</Text>
+              : <Text color="red">DOWN — nothing advances until it is up</Text>}
+            <Text dimColor>  {project.unclaimed} unclaimed  {project.working} working</Text>
           </Line>
         </>
       ) : (
-        <Line label="project"><Text dimColor>none linked to this run</Text></Line>
+        <Line label="project">
+          <Text dimColor>none linked — run </Text>
+          <Text color="cyan">triad engage</Text>
+          <Text dimColor> for a proper link, or press </Text>
+          <Text color="cyan">f</Text>
+          <Text dimColor> to feed this run</Text>
+        </Line>
       )}
 
       <Box marginTop={1}><Text bold>TELEMETRY</Text></Box>
-      <Line label="sandbox"><Text>{metrics.sandbox}</Text></Line>
-      <Line label="scan"><Text>{metrics.strix}</Text></Line>
+      <Line label="sandbox">
+        <Text color="cyan">{sparkline(hist.current.sandbox)}</Text>
+        <Text>  {metrics.sandbox}</Text>
+      </Line>
+      <Line label="scan">
+        <Text color="cyan">{sparkline(hist.current.scan)}</Text>
+        <Text>  {metrics.strix}</Text>
+      </Line>
       <Line label="dispatcher"><Text>{metrics.dispatcher}</Text></Line>
+      <Line label="memory">
+        <Text color="cyan">{sparkline(hist.current.mem)}</Text>
+        <Text>  {metrics.strixMemKb === null ? '-' : humanKb(metrics.strixMemKb)}</Text>
+      </Line>
+
+      <Box marginTop={1}><Text bold>ARTIFACTS</Text></Box>
+      <Line label="engagement"><Text>{tilde(run.workdir)}</Text></Line>
+      <Line label="run dir"><Text>{tilde(run.dir)}</Text></Line>
+      <Line label="report">{tick(artifacts.report)}<Text dimColor> report.md</Text></Line>
+      <Line label="vulns">
+        {tick(artifacts.vulns)}<Text dimColor> vulnerabilities.json</Text>
+        {artifacts.vulns && artifacts.vulnsCount !== null
+          ? <Text dimColor>  {artifacts.vulnsCount} findings</Text>
+          : null}
+      </Line>
+      <Line label="sarif">{tick(artifacts.sarif)}<Text dimColor> findings.sarif</Text></Line>
+      <Line label="coverage">{tick(artifacts.coverage)}<Text dimColor> coverage.json</Text></Line>
     </Box>
   );
 }
@@ -497,9 +721,13 @@ function App({interval}: {interval: number}) {
   const [help, setHelp] = useState(false);
   const [listsCollapsed, setListsCollapsed] = useState(false);
   const [containers, setContainers] = useState<Record<string, {cpu: string; mem: string}>>({});
-  const [procs, setProcs] = useState<Record<number, {cpu: number | null; rss: string}>>({});
+  const [procs, setProcs] = useState<Record<number, {cpu: number | null; rss: string; rssKb: number}>>({});
   const samples = useRef<Record<number, ProcSample>>({});
   const busy = useRef(false);
+  // Starts below zero so the detail pane's first real poll (0) is unmistakable: the snapshot
+  // lands a commit before the metrics of the same refresh, and that half-filled commit must
+  // not count as a sample.
+  const [pollSeq, setPollSeq] = useState(-1);
 
   const [mode, setMode] = useState<'list' | 'form' | 'verbose'>('list');
   const [form, setForm] = useState<NewEngagement>(BLANK_FORM);
@@ -529,14 +757,17 @@ function App({interval}: {interval: number}) {
       const pids = new Set<number>();
       for (const run of snap.runs) if (run.pid) pids.add(run.pid);
       if (snap.dispatcher.pid) pids.add(snap.dispatcher.pid);
-      const next: Record<number, {cpu: number | null; rss: string}> = {};
+      const next: Record<number, {cpu: number | null; rss: string; rssKb: number}> = {};
       for (const pid of pids) {
         const sample = await readProc(pid);
         const cpu = cpuPercent(sample, samples.current[pid] ?? null);
         if (sample) samples.current[pid] = sample;
-        next[pid] = {cpu, rss: sample ? humanKb(sample.rssKb) : '-'};
+        next[pid] = {cpu, rss: sample ? humanKb(sample.rssKb) : '-', rssKb: sample ? sample.rssKb : 0};
       }
       setProcs(next);
+      // One tick per completed poll: the detail pane's histories advance on this, never on the
+      // frame ticker, so a sparkline records snapshots rather than redraws.
+      setPollSeq(s => s + 1);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -600,6 +831,8 @@ function App({interval}: {interval: number}) {
       facts: found.fact_count ?? 0, hints: found.hint_count ?? 0,
       intents: found.intent_count ?? 0,
       open: (found.unclaimed_intent_count ?? 0) + (found.working_intent_count ?? 0),
+      unclaimed: found.unclaimed_intent_count ?? 0,
+      working: found.working_intent_count ?? 0,
     };
   })();
 
@@ -903,9 +1136,12 @@ function App({interval}: {interval: number}) {
   const dispatcherPid = snapshot?.dispatcher.pid ?? null;
   const metrics = {
     sandbox: sandbox ? `${sandbox[1].cpu.padStart(5)} cpu  ${sandbox[1].mem}` : 'no scan container',
+    sandboxCpu: sandbox ? parsePercent(sandbox[1].cpu) : null,
     strix: scanPid && procs[scanPid]
       ? `${String(procs[scanPid].cpu?.toFixed(0) ?? '-').padStart(4)}% cpu  ${procs[scanPid].rss}`
       : 'no live process',
+    strixCpu: scanPid ? procs[scanPid]?.cpu ?? null : null,
+    strixMemKb: scanPid ? procs[scanPid]?.rssKb ?? null : null,
     dispatcher: dispatcherPid && procs[dispatcherPid]
       ? `${String(procs[dispatcherPid].cpu?.toFixed(0) ?? '-').padStart(4)}% cpu  ${procs[dispatcherPid].rss}`
       : 'stopped',
@@ -1005,7 +1241,8 @@ function App({interval}: {interval: number}) {
           ) : error ? (
             <Text color="red">{error}</Text>
           ) : (
-            <Detail run={run} project={project} focus={focus} metrics={metrics} />
+            <Detail run={run} project={project} focus={focus} metrics={metrics}
+                    poll={pollSeq} dispatcherAlive={Boolean(snapshot?.dispatcher.alive)} />
           )}
         </Box>
       </Box>
