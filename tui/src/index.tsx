@@ -132,6 +132,25 @@ function wrapSpans(spans: Span[], width: number): Line[] {
   return lines.length ? lines : [[]];
 }
 
+// Status has a hard three-row budget, so it is cut to the pane width rather than wrapped:
+// a wrapped status would quietly add rows and start eating the stream again.
+function clampLine(spans: Span[], width: number): Line {
+  const out: Line = [];
+  let used = 0;
+  for (const span of spans) {
+    if (used >= width) break;
+    const room = width - used;
+    if (span.text.length <= room) {
+      out.push({...span});
+      used += span.text.length;
+    } else {
+      out.push({...span, text: `${span.text.slice(0, Math.max(0, room - 1))}…`});
+      break;
+    }
+  }
+  return out.length ? out : [{text: ' '}];
+}
+
 function gapText(gap: unknown): string {
   if (typeof gap === 'string') return gap;
   if (gap && typeof gap === 'object') {
@@ -162,6 +181,47 @@ function LineView({line}: {line: Line}) {
         <Text key={i} color={s.color} dimColor={s.dim} bold={s.bold}>{s.text}</Text>
       ))}
     </Text>
+  );
+}
+
+// The title rides in the top border, so a pane costs exactly one title row plus a bottom
+// border no matter how long its name is.
+function borderLine(title: string, width: number): string {
+  const label = ` ${fit(title, Math.max(0, width - 4)).trimEnd()} `;
+  return `╭${label}${'─'.repeat(Math.max(0, width - 2 - label.length))}╮`;
+}
+
+// A pane whose content is taller than its window says where the reader is: the last visible
+// line over the total, plus an arrow for hidden content on either side. A pane that fits
+// adds nothing, so a title only carries a marker when something is actually out of sight.
+function overflowMark(offset: number, total: number, visible: number): string {
+  if (visible <= 0 || total <= visible) return '';
+  const last = Math.min(total, offset + visible);
+  const up = offset > 0 ? '↑ ' : '';
+  const down = last < total ? ` ↓ ${total - last} more` : '';
+  return `${up}${last}/${total}${down}`;
+}
+
+// One scrolling region of the split detail body: a titled top border, a fixed content area
+// clipped to its own height, and a bottom border. Content is pre-wrapped to the inner width.
+function Pane({title, width, contentHeight, focused, lines}: {
+  title: string; width: number; contentHeight: number; focused: boolean; lines: Line[];
+}) {
+  const colour = focused ? 'cyan' : 'gray';
+  return (
+    <Box flexDirection="column" flexShrink={0}>
+      <Text color={colour}>{borderLine(title, width)}</Text>
+      <Box
+        flexDirection="column"
+        borderStyle="round"
+        borderTop={false}
+        borderColor={colour}
+        height={contentHeight + 1}
+        overflow="hidden"
+      >
+        {lines.map((line, i) => <LineView key={i} line={line} />)}
+      </Box>
+    </Box>
   );
 }
 
@@ -312,74 +372,70 @@ function Form({fields, row, error}: {fields: NewEngagement; row: number; error: 
   );
 }
 
-function buildHeader(d: ProgressDetail, width: number, findingsShown: number, gapsShown: number): Line[] {
-  const lines: Line[] = [];
-  const push = (spans: Span[]) => { for (const line of wrapSpans(spans, width)) lines.push(line); };
-  const state = stateOf(d);
-
-  push([
-    {text: ' '},
-    {text: d.run, bold: true, color: 'cyan'},
-    {text: '  '},
-    {text: state, color: STATE_COLOUR[state] ?? 'gray'},
-    {text: `  ${elapsed(d.start_time, d.end_time)}  pid ${d.pid ?? '-'}`, dim: true},
-  ]);
-
-  const running = d.agents.running.filter(Boolean);
-  push([
-    {text: ' agents '},
-    {text: `${d.agents.completed}/${d.agents.total} done`,
-     color: d.agents.completed === d.agents.total ? 'green' : undefined},
-    ...(running.length
-      ? [{text: `  running: ${running.slice(0, 3).join(', ')}${running.length > 3 ? ` +${running.length - 3}` : ''}`, color: 'cyan'}]
-      : []),
-    ...(d.agents.failed ? [{text: `  ${d.agents.failed} failed`, color: 'red'}] : []),
-  ]);
-
-  const findings = d.findings_detail ?? [];
-  const total = findings.length || d.findings || 0;
-  push([
-    {text: ' findings '},
-    {text: String(total), bold: true, color: total ? 'white' : 'gray'},
-    ...(findings.length ? [{text: `  ${severityTally(findings)}`, dim: true}] : []),
-  ]);
-  for (const f of findings.slice(0, findingsShown)) {
-    const colour = severityColour(f.severity);
-    push([
-      {text: '   '},
-      {text: `[${String(f.severity ?? '?').toLowerCase()}] `, color: colour},
-      {text: f.title ?? '(untitled)', color: colour},
-    ]);
-  }
-  if (findings.length > findingsShown) {
-    push([{text: `   +${findings.length - findingsShown} more findings`, dim: true}]);
-  }
-
+function coverageBits(d: ProgressDetail) {
   const summary = (d.coverage?.summary && typeof d.coverage.summary === 'object')
     ? d.coverage.summary as {surfaces_reviewed?: number; findings_filed?: number; gaps?: number}
     : {};
   const gaps = Array.isArray(d.coverage?.gaps) ? d.coverage.gaps : [];
   // The count follows the list the pane renders: when the run supplied gaps, use their
-  // length, so a header can never say more gaps than it shows.
+  // length, so a heading can never say more gaps than it shows.
   const gapCount = gaps.length || (typeof summary.gaps === 'number' ? summary.gaps : 0);
-  push([
-    {text: ' coverage '},
-    {text: `${summary.surfaces_reviewed ?? 0} surfaces reviewed · ${summary.findings_filed ?? 0} filed · `},
-    {text: `${gapCount} gap${gapCount === 1 ? '' : 's'}`, color: gapCount ? 'yellow' : 'green'},
-  ]);
-  for (const gap of gaps.slice(0, gapsShown)) {
-    push([{text: '   · '}, {text: gapText(gap), color: 'yellow'}]);
+  return {summary, gaps, gapCount};
+}
+
+// The status block is three clamped rows by design: it used to grow a line per field and
+// squeeze the stream down to a few rows. The state is handed in from the snapshot, because
+// the detail payload does not carry `live`/`paused` and deriving it here would read "stale"
+// for a run the list row still animates.
+function buildStatus(d: ProgressDetail, width: number, state: string): Line[] {
+  const findings = d.findings_detail ?? [];
+  const {summary, gapCount} = coverageBits(d);
+  return [
+    clampLine([
+      {text: ' '},
+      {text: d.run, bold: true, color: 'cyan'},
+      {text: '  '},
+      {text: state, color: STATE_COLOUR[state] ?? 'gray'},
+      {text: `  ${elapsed(d.start_time, d.end_time)}  pid ${d.pid ?? '-'}`, dim: true},
+    ], width),
+    clampLine([
+      {text: ' '},
+      {text: `agents ${d.agents.completed}/${d.agents.total} done · todos ${d.todos.done}/${d.todos.total}`},
+      ...(d.agents.failed ? [{text: ` · ${d.agents.failed} failed`, color: 'red'}] : []),
+    ], width),
+    clampLine([
+      {text: ' coverage '},
+      {text: `${summary.surfaces_reviewed ?? 0} surfaces · ${summary.findings_filed ?? findings.length} filed · `},
+      {text: `${gapCount} gap${gapCount === 1 ? '' : 's'}`, color: gapCount ? 'yellow' : 'green'},
+      {text: ' · '},
+      {text: `usage ${human(d.usage.input_tokens)} in / ${human(d.usage.output_tokens)} out`, dim: true},
+      {text: ` · $${d.cost_usd ?? '-'}`, dim: true},
+    ], width),
+  ];
+}
+
+// The findings pane is status, then findings, then coverage gaps, with no cap on either list:
+// it scrolls, so a run with a hundred findings shows all of them without hiding the stream.
+// The pane border already names the list and counts it, so the content line carries only the
+// severity breakdown.
+function buildFindings(d: ProgressDetail, width: number, state: string): Line[] {
+  const lines = buildStatus(d, width, state);
+  const push = (spans: Span[]) => { for (const line of wrapSpans(spans, width)) lines.push(line); };
+  const findings = d.findings_detail ?? [];
+
+  if (findings.length) push([{text: ` severity  ${severityTally(findings)}`, dim: true}]);
+  for (const f of findings) {
+    const colour = severityColour(f.severity);
+    push([
+      {text: '  '},
+      {text: `[${String(f.severity ?? '?').toLowerCase()}] `, color: colour},
+      {text: f.title ?? '(untitled)', color: colour},
+    ]);
   }
-  if (gaps.length > gapsShown) push([{text: `   +${gaps.length - gapsShown} more gaps`, dim: true}]);
 
-  push([
-    {text: ' usage '},
-    {text: `${human(d.usage.input_tokens)} in / ${human(d.usage.output_tokens)} out`},
-    {text: ` · ${d.usage.requests ?? '-'} requests`},
-    {text: ` · $${d.cost_usd ?? '-'}`, dim: true},
-  ]);
-
-  push([{text: `AGENT STREAM (${(d.messages ?? []).length})`, bold: true, color: 'white'}]);
+  const {gaps, gapCount} = coverageBits(d);
+  push([{text: ` COVERAGE GAPS (${gapCount})`, bold: true, color: 'white'}]);
+  for (const gap of gaps) push([{text: '  · '}, {text: gapText(gap), color: 'yellow'}]);
   return lines;
 }
 
@@ -453,6 +509,8 @@ function App({interval}: {interval: number}) {
   const [detailOffset, setDetailOffset] = useState(0);
   const [detailNew, setDetailNew] = useState(0);
   const [detailFollow, setDetailFollow] = useState(true);
+  const [detailPane, setDetailPane] = useState<'findings' | 'stream'>('stream');
+  const [findingsOffset, setFindingsOffset] = useState(0);
   const [frame, setFrame] = useState(0);
   const scrollReset = useRef(true);
 
@@ -545,34 +603,49 @@ function App({interval}: {interval: number}) {
   const rows = process.stdout.rows ?? 40;
   const cols = process.stdout.columns ?? 132;
   const viewHeight = Math.max(5, rows - 6);
-  // -50 leaves the RUNS column (46) plus the pane border and padding; pre-wrapping to this
-  // width keeps every rendered line inside the box.
-  const paneWidth = Math.max(24, cols - 50);
+  // -50 leaves the RUNS column (46) plus the outer pane border and padding, so this is the
+  // width the two panes share. Each pane's border eats two more columns for its inner text.
+  const bodyWidth = Math.max(24, cols - 50);
+  const paneInner = Math.max(20, bodyWidth - 2);
 
-  // The header gets a share of the pane and the stream gets the rest; capping the findings
-  // and gaps lists keeps a run with a hundred findings from swallowing the stream.
-  const findingsCap = Math.max(2, Math.floor((viewHeight - 6) * 0.34));
-  const gapsCap = Math.max(1, Math.floor((viewHeight - 6) * 0.15));
-  const header = useMemo(
-    () => (detail ? buildHeader(detail, paneWidth, findingsCap, gapsCap) : []),
-    [detail, paneWidth, findingsCap, gapsCap],
-  );
-  const stream = useMemo(() => (detail ? buildStream(detail, paneWidth) : []), [detail, paneWidth]);
+  const hasDb = detail?.dir ? existsSync(join(detail.dir, '.state', 'agents.db')) : true;
 
   const detailRun = detailTarget
     ? runs.find(r => r.workdir === detailTarget.workdir && r.run === detailTarget.run) ?? null
     : null;
   const detailLive = Boolean(detailRun?.live || detailRun?.paused);
   const detailPaused = Boolean(detailRun?.paused);
+  // The pane's own state line reads from the same snapshot run as the list row, so a live
+  // scan can never show `scanning` up top and `stale` in the pane.
+  const detailState = detailRun ? stateOf(detailRun) : detail ? stateOf(detail) : 'unknown';
   const currentText = detail?.agents.running?.[0]
     ?? detail?.todos_detail?.find(t => t.status === 'in_progress')?.title
     ?? 'working';
   const liveRow = detailLive ? 1 : 0;
+  const warnRow = detail && !hasDb ? 1 : 0;
 
-  const shownHeader = header.slice(0, Math.max(3, viewHeight - 4 - liveRow));
-  const streamHeight = Math.max(3, viewHeight - shownHeader.length - liveRow);
+  // The upper pane takes max(6, 40%) of the body; the stream keeps the rest. On a 42-row
+  // terminal that is 14 rows of findings and 22 of stream, so the stream stays the majority.
+  const paneRows = Math.max(8, viewHeight - liveRow - warnRow);
+  const upperRows = Math.max(6, Math.floor(paneRows * 0.4));
+  const streamRows = paneRows - upperRows;
+  const findingsHeight = Math.max(1, upperRows - 2);
+  const streamHeight = Math.max(1, streamRows - 2);
+
+  const findings = useMemo(
+    () => (detail ? buildFindings(detail, paneInner, detailState) : []),
+    [detail, paneInner, detailState],
+  );
+  const stream = useMemo(() => (detail ? buildStream(detail, paneInner) : []), [detail, paneInner]);
+
+  const findingsMax = Math.max(0, findings.length - findingsHeight);
+  const clampedFindingsOffset = Math.min(findingsOffset, findingsMax);
   const maxOffset = Math.max(0, stream.length - streamHeight);
   const clampedOffset = Math.min(detailOffset, maxOffset);
+  const findingsMark = overflowMark(clampedFindingsOffset, findings.length, findingsHeight);
+  const streamMark = overflowMark(clampedOffset, stream.length, streamHeight);
+  const findingsCount = detail?.findings_detail?.length ?? detail?.findings ?? 0;
+  const messageCount = (detail?.messages ?? []).length;
   const topMessageId = detail?.messages?.length ? detail.messages[detail.messages.length - 1].id : 0;
 
   // Follow the tail only when the follow intent and the live offset agree. Judging "at the
@@ -595,13 +668,16 @@ function App({interval}: {interval: number}) {
       return;
     }
     const wasAtBottom = detailOffset >= prevMaxRef.current;
+    const grew = stream.length > prevLenRef.current;
     const shift = stream.length - prevLenRef.current;
     prevMaxRef.current = newMax;
     prevLenRef.current = stream.length;
-    if (detailFollow && wasAtBottom) {
-      setDetailOffset(newMax);
+    // Follow only while the stream is focused. Tabbing to findings freezes the stream: a
+    // new arrival counts as paused instead of moving either pane.
+    if (detailFollow && wasAtBottom && (detailPane === 'stream' || !grew)) {
+      if (detailPane === 'stream') setDetailOffset(newMax);
       setDetailNew(0);
-      baselineIdRef.current = topMessageId;
+      if (grew) baselineIdRef.current = topMessageId;
       return;
     }
     if (detailFollow) setDetailFollow(false);
@@ -611,7 +687,7 @@ function App({interval}: {interval: number}) {
     // the same amount so the messages on screen do not jump under the reader.
     const target = Math.max(0, Math.min(newMax, detailOffset + Math.min(0, shift)));
     if (target !== detailOffset) setDetailOffset(target);
-  }, [detail, stream.length, streamHeight, detailOffset, detailFollow, topMessageId]);
+  }, [detail, stream.length, streamHeight, detailOffset, detailFollow, detailPane, topMessageId]);
 
   const act = useCallback(async (label: string, fn: () => Promise<string>) => {
     setMessage({text: `${label}…`, kind: 'info'});
@@ -634,6 +710,8 @@ function App({interval}: {interval: number}) {
     setDetailOffset(0);
     setDetailNew(0);
     setDetailFollow(true);
+    setDetailPane('stream');
+    setFindingsOffset(0);
     if (!r.workdir) {
       setDetailTarget(null);
       setDetailError('this run has no directory on disk');
@@ -712,8 +790,13 @@ function App({interval}: {interval: number}) {
         if (detailTarget) void loadDetail(detailTarget.workdir, detailTarget.run);
         return;
       }
-      // Scrolling up pauses; reaching the bottom again (or End) resumes. Home stops at the
-      // top. The follow intent is validated against the offset by the stream effect.
+      // tab moves between the two panes; the list view keeps its own tab meaning.
+      if (key.tab) {
+        setDetailPane(p => (p === 'findings' ? 'stream' : 'findings'));
+        return;
+      }
+      // Scrolling up pauses the stream; reaching the bottom again (or End) resumes. Home
+      // stops at the top. Findings scrolling never touches the stream's follow state.
       const step = (delta: number) => {
         const next = Math.min(maxOffset, Math.max(0, detailOffset + delta));
         if (next >= maxOffset) {
@@ -725,17 +808,25 @@ function App({interval}: {interval: number}) {
         }
         setDetailOffset(next);
       };
-      if (key.upArrow || input === 'k') return step(-1);
-      if (key.downArrow || input === 'j') return step(1);
-      if (key.pageUp) return step(-streamHeight);
-      if (key.pageDown) return step(streamHeight);
+      const stepFindings = (delta: number) => {
+        setFindingsOffset(o => Math.min(findingsMax, Math.max(0, o + delta)));
+      };
+      const scrolling = detailPane === 'findings'
+        ? {step: stepFindings, page: findingsHeight}
+        : {step, page: streamHeight};
+      if (key.upArrow || input === 'k') return scrolling.step(-1);
+      if (key.downArrow || input === 'j') return scrolling.step(1);
+      if (key.pageUp) return scrolling.step(-scrolling.page);
+      if (key.pageDown) return scrolling.step(scrolling.page);
       if (key.home || input === 'g') {
+        if (detailPane === 'findings') return setFindingsOffset(0);
         setDetailFollow(false);
         baselineIdRef.current = topMessageId;
         setDetailNew(0);
         return setDetailOffset(0);
       }
       if (key.end || input === 'G') {
+        if (detailPane === 'findings') return setFindingsOffset(findingsMax);
         setDetailFollow(true);
         setDetailNew(0);
         return setDetailOffset(maxOffset);
@@ -808,8 +899,8 @@ function App({interval}: {interval: number}) {
   };
   const cairnLine = cairn ? `  cairn ${cairn.cpu} cpu  ${cairn.mem}` : '';
 
-  const window = stream.slice(clampedOffset, clampedOffset + streamHeight);
-  const hasDb = detail?.dir ? existsSync(join(detail.dir, '.state', 'agents.db')) : true;
+  const findingsWindow = findings.slice(clampedFindingsOffset, clampedFindingsOffset + findingsHeight);
+  const streamWindow = stream.slice(clampedOffset, clampedOffset + streamHeight);
 
   return (
     <Box flexDirection="column" height={rows - 1}>
@@ -866,12 +957,20 @@ function App({interval}: {interval: number}) {
                       <Text color={detailPaused ? STATE_COLOUR.paused : 'cyan'}>{currentText}</Text>
                     </Box>
                   )}
-                  {shownHeader.map((line, i) => <LineView key={`h${i}`} line={line} />)}
-                  <Box flexDirection="column" height={streamHeight}>
-                    {window.map((line, i) => (
-                      <LineView key={`s${clampedOffset + i}`} line={line} />
-                    ))}
-                  </Box>
+                  <Pane
+                    title={`FINDINGS (${findingsCount})${findingsMark ? `  ${findingsMark}` : ''}`}
+                    width={bodyWidth}
+                    contentHeight={findingsHeight}
+                    focused={detailPane === 'findings'}
+                    lines={findingsWindow}
+                  />
+                  <Pane
+                    title={`AGENT STREAM (${messageCount})${streamMark ? `  ${streamMark}` : ''}`}
+                    width={bodyWidth}
+                    contentHeight={streamHeight}
+                    focused={detailPane === 'stream'}
+                    lines={streamWindow}
+                  />
                 </>
               )}
             </Box>
@@ -888,7 +987,7 @@ function App({interval}: {interval: number}) {
           <Text dimColor>form open: esc cancels, no other key acts</Text>
         ) : mode === 'verbose' ? (
           <Text dimColor>
-            esc back  ↑/↓ scroll  g/G top/end  r refresh  {'  '}
+            esc back  tab pane  ↑/↓ scroll  g/G top/end  r refresh  pane: {detailPane}  {'  '}
             {detailFollow
               ? 'follow: on (tail -f)'
               : detailNew > 0
