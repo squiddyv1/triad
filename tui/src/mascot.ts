@@ -5,46 +5,45 @@ import React from 'react';
 import {Box, Text} from 'ink';
 
 export type Lab = {
-  label: string;
   color: string;
   art: string[];
   words: string[];
 };
 
-// Three lines per lab, so every figure costs the same rows and the column never jumps.
-// Eyes are literal `o`s: the sleeping pose is a single character swap.
+// Four lines and the same sixteen-column reach per lab, so every figure costs the same rows
+// and the column never jumps. Eyes are literal `o`s: the sleeping pose is a character swap.
 export const LABS: Lab[] = [
   {
-    label: 'deepseek',
     color: '#4D6BFE',
     art: [
-      '   ___',
-      '  (o o)___',
-      '   \\___/~',
+      '      ______',
+      '     ( o  o )___',
+      '      \\  __  /~',
+      '       \\____/',
     ],
     words: ['pondering', 'percolating', 'marinating', 'noodling', 'moseying',
             'frolicking', 'simmering', 'drifting', 'bobbing', 'breaching',
             'dawdling', 'meandering', 'vibing'],
   },
   {
-    label: 'anthropic',
     color: '#D97757',
     art: [
-      '   /\\',
-      '  /o o\\',
-      ' /_/ \\_\\',
+      '        /\\',
+      '      /    \\',
+      '     /  o o  \\',
+      '    /__/    \\__\\',
     ],
     words: ['ruminating', 'cogitating', 'tinkering', 'scheming', 'deliberating',
             'mulling', 'weighing', 'brooding', 'pontificating', 'deducing',
             'philosophising', 'contriving', 'pondering'],
   },
   {
-    label: 'openai',
     color: '#10A37F',
     art: [
-      '  \\_|_/',
-      '  (o o)',
-      '  /_|_\\',
+      '    \\_____|____/',
+      '     (  o o  )',
+      '     /  _|_  \\',
+      '    /____|____\\',
     ],
     words: ['noodling', 'tinkering', 'scheming', 'vibing', 'synthesising',
             'orchestrating', 'wrangling', 'iterating', 'spinning', 'weaving',
@@ -94,13 +93,13 @@ function closeEyes(line: string): string {
   return line.replace(/o/g, '-');
 }
 
-const BUBBLE_INNER = 20;
+const BUBBLE_INNER = 25;
 const TAIL = 3;
 const BUBBLE_INDENT = '  ';
 const ART_COL = TAIL + 8;                     // art lines up under the pointer arrow
 const ART_INDENT = ' '.repeat(ART_COL);
 const POINTER = ' '.repeat(TAIL + 3) + '╰─▸';
-const MIN_ROWS = 8;                           // bubble + bobbing slot + label
+const MIN_ROWS = 8;                           // bubble + bobbing slot for the figure
 
 function fit(text: string, width: number): string {
   return text.length > width ? text.slice(0, width - 1) + '…' : text.padEnd(width);
@@ -123,32 +122,35 @@ export function Mascot({animating, paused, frame, leftRows, activity, now}: {
   const {lab, art, word, bob, sleeping} = mascotState({
     animating, paused, frame, now: now ?? Date.now(),
   });
-  // Four rows for a three-line figure: the spare row moves top or bottom, which is the bob.
+  // Five rows for a four-line figure: the spare row moves top or bottom, which is the bob.
   const slot = bob ? ['', ...art] : [...art, ''];
   const showActivity = animating && leftRows > MIN_ROWS && Boolean(activity);
   const top = `${BUBBLE_INDENT}╭${'─'.repeat(BUBBLE_INNER)}╮`;
   const mid = `${BUBBLE_INDENT}(${fit(`  ${word}…`, BUBBLE_INNER)})`;
   const bottom = `${BUBBLE_INDENT}╰${'─'.repeat(TAIL)}╮${
     '─'.repeat(BUBBLE_INNER - TAIL - 1)}╯`;
-  const figure = [
-    `${POINTER}  ${slot[0]}`,
-    `${ART_INDENT}${slot[1]}`,
-    `${ART_INDENT}${slot[2]}`,
-    `${ART_INDENT}${slot[3]}`,
-  ];
+  // The first slot row rides the bubble pointer; the rest indent to the same column, so the
+  // bob moves the whole figure without breaking that alignment.
+  const figure = slot.map(
+    (row, i) => (i === 0 ? `${POINTER}  ${row}` : `${ART_INDENT}${row}`),
+  );
   const children: React.ReactNode[] = [
     line(top, {dimColor: sleeping}, 'top'),
     line(mid, {dimColor: sleeping}, 'mid'),
     line(bottom, {dimColor: sleeping}, 'bottom'),
     ...figure.map((text, i) => line(text, {color: lab.color, dimColor: sleeping}, `fig${i}`)),
-    line(`${ART_INDENT}${lab.label}`, {bold: true, color: lab.color}, 'label'),
   ];
   if (showActivity) {
     children.push(line(`${ART_INDENT}${fit(String(activity), 46 - ART_COL)}`, {dimColor: true}, 'doing'));
   }
+  // The column takes every row the lists leave and centres the figure in them; overflow hidden
+  // keeps a short terminal from drawing over the footer.
   return React.createElement(
     Box,
-    {flexDirection: 'column', flexGrow: 1, flexShrink: 0, overflow: 'hidden'},
+    {
+      flexDirection: 'column', flexGrow: 1, flexShrink: 0,
+      justifyContent: 'center', overflow: 'hidden',
+    },
     ...children,
   );
 }

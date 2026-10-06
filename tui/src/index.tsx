@@ -26,6 +26,7 @@ const HELP = [
   ['s', 'stop the target'],
   ['d', 'delete the target (asks first)'],
   ['f', 'feed the selected run into its project again'],
+  ['c', 'collapse the run and project lists'],
   ['r', 'refresh now'],
   ['?', 'hide this help'],
   ['q', 'quit'],
@@ -494,6 +495,7 @@ function App({interval}: {interval: number}) {
   const [message, setMessage] = useState<{text: string; kind: 'ok' | 'err' | 'info'} | null>(null);
   const [pendingDelete, setPendingDelete] = useState<Target | null>(null);
   const [help, setHelp] = useState(false);
+  const [listsCollapsed, setListsCollapsed] = useState(false);
   const [containers, setContainers] = useState<Record<string, {cpu: string; mem: string}>>({});
   const [procs, setProcs] = useState<Record<number, {cpu: number | null; rss: string}>>({});
   const samples = useRef<Record<number, ProcSample>>({});
@@ -610,9 +612,11 @@ function App({interval}: {interval: number}) {
   // width the two panes share. Each pane's border eats two more columns for its inner text.
   const bodyWidth = Math.max(24, cols - 50);
   const paneInner = Math.max(20, bodyWidth - 2);
-  // The cartoon only gets the rows the RUNS and PROJECTS lists leave free.
+  // The cartoon only gets the rows the RUNS and PROJECTS lists leave free. Collapsed lists are
+  // the two headers plus their gap, so the figure always has room.
   const projectCount = snapshot?.cairn.projects.length ?? 0;
-  const leftRows = Math.max(0, (rows - 4) - (runs.length + projectCount + 3));
+  const listRows = listsCollapsed ? 3 : runs.length + projectCount + 3;
+  const leftRows = Math.max(0, (rows - 4) - listRows);
 
   const hasDb = detail?.dir ? existsSync(join(detail.dir, '.state', 'agents.db')) : true;
 
@@ -792,6 +796,8 @@ function App({interval}: {interval: number}) {
     if (mode === 'verbose') {
       if (input === 'q' || (key.ctrl && input === 'c')) return exit();
       if (key.escape || key.return) { setMode('list'); return; }
+      // Collapse the left lists from the detail view too; it never touches the pane focus.
+      if (input === 'c') return setListsCollapsed(v => !v);
       if (input === 'r') {
         if (detailTarget) void loadDetail(detailTarget.workdir, detailTarget.run);
         return;
@@ -854,6 +860,7 @@ function App({interval}: {interval: number}) {
     }
     if (input === 'q' || (key.ctrl && input === 'c')) return exit();
     if (input === '?') return setHelp(h => !h);
+    if (input === 'c') return setListsCollapsed(v => !v);
     if (input === 'n') {
       setForm(BLANK_FORM);
       setFormRow(1);
@@ -931,12 +938,18 @@ function App({interval}: {interval: number}) {
       <Box flexGrow={1} marginTop={1}>
         <Box flexDirection="column" width={46}>
           <Box flexDirection="column" flexShrink={0}>
-            <Text bold>RUNS ({runs.length})</Text>
-            {runs.length === 0 && <Text dimColor>  none</Text>}
-            {runs.map((r, i) => <Row key={r.dir} run={r} selected={i === index} frame={frame} />)}
+            <Text bold>
+              {listsCollapsed
+                ? fit(run ? `RUNS (${runs.length})  ▸ ${run.run}` : `RUNS (${runs.length})`, 46)
+                : `RUNS (${runs.length})`}
+            </Text>
+            {!listsCollapsed && runs.length === 0 && <Text dimColor>  none</Text>}
+            {!listsCollapsed && runs.map((r, i) => (
+              <Row key={r.dir} run={r} selected={i === index} frame={frame} />
+            ))}
             <Box marginTop={1} flexDirection="column">
-              <Text bold>PROJECTS ({snapshot?.cairn.projects.length ?? 0})</Text>
-              {(snapshot?.cairn.projects ?? []).map(p => (
+              <Text bold>PROJECTS ({projectCount})</Text>
+              {!listsCollapsed && (snapshot?.cairn.projects ?? []).map(p => (
                 <Text key={p.id} dimColor={p.id !== run?.project}>
                   {'  '}{p.id} <Text color={p.status === 'active' ? 'green' : 'yellow'}>{p.status}</Text>
                   {' '}{p.hint_count ?? 0}h {p.intent_count ?? 0}i
@@ -1002,7 +1015,7 @@ function App({interval}: {interval: number}) {
           <Text dimColor>form open: esc cancels, no other key acts</Text>
         ) : mode === 'verbose' ? (
           <Text dimColor>
-            esc back  tab pane  ↑/↓ scroll  g/G top/end  r refresh  pane: {detailPane}  {'  '}
+            esc back  tab pane  ↑/↓ scroll  g/G top/end  r refresh  c lists  pane: {detailPane}  {'  '}
             {detailFollow
               ? 'follow: on (tail -f)'
               : detailNew > 0
@@ -1028,7 +1041,7 @@ function App({interval}: {interval: number}) {
                 {message.kind === 'err' ? '✗ ' : message.kind === 'ok' ? '✓ ' : '  '}{message.text}
               </Text>
             )}
-            <Text dimColor>n new  p pause  s stop  d delete  f feed  enter detail  tab target: {focus}  r refresh  ? help  q quit</Text>
+            <Text dimColor>n new  p pause  s stop  d delete  f feed  c lists  enter detail  tab target: {focus}  r refresh  ? help  q quit</Text>
           </>
         )}
       </Box>
