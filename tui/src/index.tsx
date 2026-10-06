@@ -15,6 +15,7 @@ import {
   feed, pauseOrResume, remove, startEngage, startScan, stop,
   type Focus, type NewEngagement, type ScanMode, type Target,
 } from './control.js';
+import {Mascot} from './mascot.js';
 
 const HELP = [
   ['↑/↓  k/j', 'select a run'],
@@ -584,6 +585,8 @@ function App({interval}: {interval: number}) {
     return () => clearInterval(timer);
   }, [animatingCount]);
 
+  const activeRun = runs.find(r => r.live || r.paused) ?? null;
+
   const index = Math.min(selected, Math.max(0, runs.length - 1));
   const run = runs[index] ?? null;
   const project = (() => {
@@ -607,6 +610,9 @@ function App({interval}: {interval: number}) {
   // width the two panes share. Each pane's border eats two more columns for its inner text.
   const bodyWidth = Math.max(24, cols - 50);
   const paneInner = Math.max(20, bodyWidth - 2);
+  // The cartoon only gets the rows the RUNS and PROJECTS lists leave free.
+  const projectCount = snapshot?.cairn.projects.length ?? 0;
+  const leftRows = Math.max(0, (rows - 4) - (runs.length + projectCount + 3));
 
   const hasDb = detail?.dir ? existsSync(join(detail.dir, '.state', 'agents.db')) : true;
 
@@ -924,18 +930,27 @@ function App({interval}: {interval: number}) {
 
       <Box flexGrow={1} marginTop={1}>
         <Box flexDirection="column" width={46}>
-          <Text bold>RUNS ({runs.length})</Text>
-          {runs.length === 0 && <Text dimColor>  none</Text>}
-          {runs.map((r, i) => <Row key={r.dir} run={r} selected={i === index} frame={frame} />)}
-          <Box marginTop={1} flexDirection="column">
-            <Text bold>PROJECTS ({snapshot?.cairn.projects.length ?? 0})</Text>
-            {(snapshot?.cairn.projects ?? []).map(p => (
-              <Text key={p.id} dimColor={p.id !== run?.project}>
-                {'  '}{p.id} <Text color={p.status === 'active' ? 'green' : 'yellow'}>{p.status}</Text>
-                {' '}{p.hint_count ?? 0}h {p.intent_count ?? 0}i
-              </Text>
-            ))}
+          <Box flexDirection="column" flexShrink={0}>
+            <Text bold>RUNS ({runs.length})</Text>
+            {runs.length === 0 && <Text dimColor>  none</Text>}
+            {runs.map((r, i) => <Row key={r.dir} run={r} selected={i === index} frame={frame} />)}
+            <Box marginTop={1} flexDirection="column">
+              <Text bold>PROJECTS ({snapshot?.cairn.projects.length ?? 0})</Text>
+              {(snapshot?.cairn.projects ?? []).map(p => (
+                <Text key={p.id} dimColor={p.id !== run?.project}>
+                  {'  '}{p.id} <Text color={p.status === 'active' ? 'green' : 'yellow'}>{p.status}</Text>
+                  {' '}{p.hint_count ?? 0}h {p.intent_count ?? 0}i
+                </Text>
+              ))}
+            </Box>
           </Box>
+          <Mascot
+            animating={animatingCount > 0}
+            paused={animatingCount === 0 && liveCount > 0}
+            frame={frame}
+            leftRows={leftRows}
+            activity={activeRun?.agents.running[0] ?? null}
+          />
         </Box>
 
         <Box flexDirection="column" flexGrow={1} borderStyle="round" borderColor="gray" paddingX={1}>
