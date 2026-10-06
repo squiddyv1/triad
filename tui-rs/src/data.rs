@@ -489,6 +489,181 @@ pub struct CairnLogs {
     pub lines: Vec<String>,
 }
 
+// --- the Strix modal's verbose payload --------------------------------------------
+
+/// `progress --verbose --json`: the summary `RunProgress` already carries, plus the detail
+/// a human wants -- the findings by severity with their titles, the coverage gaps, and the
+/// agent stream. Mirrors `ProgressDetail` in the Ink app; unknown keys are ignored, so the
+/// CLI can add more without breaking this view.
+#[allow(dead_code)]
+#[derive(Debug, Default, Clone, Deserialize)]
+pub struct ProgressDetail {
+    #[serde(default)]
+    pub run: String,
+    #[serde(default)]
+    pub dir: String,
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub start_time: Option<String>,
+    #[serde(default)]
+    pub end_time: Option<String>,
+    #[serde(default)]
+    pub turns: Option<i64>,
+    #[serde(default)]
+    pub cost_usd: Option<f64>,
+    #[serde(default)]
+    pub findings: i64,
+    #[serde(default)]
+    pub findings_by_severity: Option<BTreeMap<String, i64>>,
+    #[serde(default)]
+    pub coverage_gaps: i64,
+    #[serde(default)]
+    pub notes: i64,
+    #[serde(default)]
+    pub agents: Agents,
+    #[serde(default)]
+    pub todos: Todos,
+    #[serde(default)]
+    pub todos_detail: Option<Vec<TodoDetail>>,
+    #[serde(default)]
+    pub usage: Usage,
+    #[serde(default)]
+    pub agents_detail: Vec<AgentDetail>,
+    #[serde(default)]
+    pub findings_detail: Vec<FindingDetail>,
+    #[serde(default)]
+    pub coverage: Option<Coverage>,
+    #[serde(default)]
+    pub messages: Vec<AgentMessage>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Default, Clone, Deserialize)]
+pub struct AgentDetail {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub pending: i64,
+}
+
+#[derive(Debug, Default, Clone, Deserialize)]
+pub struct FindingDetail {
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub severity: Option<String>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Default, Clone, Deserialize)]
+pub struct NoteDetail {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub agent_name: Option<String>,
+}
+
+/// Coverage is split across files: Strix's own summary and the gaps list. The summary's
+/// shape belongs to Strix, so it is read field by field and unknown keys are ignored.
+#[allow(dead_code)]
+#[derive(Debug, Default, Clone, Deserialize)]
+pub struct Coverage {
+    #[serde(default)]
+    pub summary: Option<CoverageSummary>,
+    #[serde(default)]
+    pub gaps: Vec<serde_json::Value>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Default, Clone, Deserialize)]
+pub struct CoverageSummary {
+    #[serde(default)]
+    pub surfaces_reviewed: Option<i64>,
+    #[serde(default)]
+    pub findings_filed: Option<i64>,
+    #[serde(default)]
+    pub gaps: Option<i64>,
+}
+
+impl Coverage {
+    /// The gap count the pane heading shows: the rendered list when there is one, else the
+    /// summary's own number, so a heading can never claim more gaps than it lists.
+    pub fn gap_count(&self, fallback: i64) -> i64 {
+        if !self.gaps.is_empty() {
+            self.gaps.len() as i64
+        } else {
+            self.summary
+                .as_ref()
+                .and_then(|summary| summary.gaps)
+                .unwrap_or(fallback)
+        }
+    }
+}
+
+/// One row of the agent stream, from `.state/agents.db`. `kind` is `message`,
+/// `reasoning`, `function_call` or `function_call_output`; the CLI has already clamped
+/// the text and flagged whether it truncated.
+#[allow(dead_code)]
+#[derive(Debug, Default, Clone, Deserialize)]
+pub struct AgentMessage {
+    #[serde(default)]
+    pub id: i64,
+    #[serde(default)]
+    pub session_id: String,
+    #[serde(default)]
+    pub agent_name: String,
+    #[serde(default)]
+    pub role: Option<String>,
+    #[serde(default, rename = "type")]
+    pub kind: String,
+    #[serde(default)]
+    pub text: String,
+    #[serde(default)]
+    pub tool: Option<String>,
+    #[serde(default)]
+    pub at: Option<String>,
+    #[serde(default)]
+    pub truncated: bool,
+}
+
+impl ProgressDetail {
+    /// The findings list the pane renders, or the summary count when no list came back.
+    pub fn findings_count(&self) -> usize {
+        if self.findings_detail.is_empty() {
+            self.findings.max(0) as usize
+        } else {
+            self.findings_detail.len()
+        }
+    }
+
+    /// The newest message id, the anchor follow-the-tail counts arrivals against. A `0`
+    /// means there is no message window yet.
+    pub fn newest_message_id(&self) -> i64 {
+        self.messages.last().map_or(0, |message| message.id)
+    }
+
+    /// The live activity line the header shows: the first running agent, else the first
+    /// in-progress todo, else nothing.
+    pub fn activity(&self) -> Option<&str> {
+        if let Some(name) = self.agents.running.first() {
+            return Some(name.as_str());
+        }
+        self.todos_detail
+            .as_deref()
+            .unwrap_or(&[])
+            .iter()
+            .find(|todo| todo.status.as_deref() == Some("in_progress"))
+            .and_then(|todo| todo.title.as_deref().or(Some(todo.id.as_str())))
+    }
+}
+
 /// Both Cairn page payloads, fetched together on one worker thread. `graph` is `None`
 /// when the run has no linked project: there is nothing to ask the CLI for, and the page
 /// says so rather than inventing a graph.
@@ -516,6 +691,29 @@ pub fn fetch_graph(project: &str) -> Result<ProjectGraph, DataError> {
         "--project".to_string(),
         project.to_string(),
         "--json".to_string(),
+    ];
+    let out = run_command(&python, &args, DEFAULT_TIMEOUT)?;
+    serde_json::from_str(&out).map_err(DataError::Json)
+}
+
+/// `triad progress --verbose --json --messages 200 --log-lines 0`, the Strix modal's
+/// payload. The log tail is deliberately not requested: the modal renders the agent
+/// stream instead, so those bytes are never paid for.
+pub fn fetch_progress_detail(workdir: &str, run: &str) -> Result<ProgressDetail, DataError> {
+    let (python, script) = cli();
+    let args = vec![
+        script,
+        "progress".to_string(),
+        "--verbose".to_string(),
+        "--json".to_string(),
+        "--workdir".to_string(),
+        workdir.to_string(),
+        "--run".to_string(),
+        run.to_string(),
+        "--messages".to_string(),
+        "200".to_string(),
+        "--log-lines".to_string(),
+        "0".to_string(),
     ];
     let out = run_command(&python, &args, DEFAULT_TIMEOUT)?;
     serde_json::from_str(&out).map_err(DataError::Json)
@@ -711,5 +909,51 @@ mod tests {
         assert_eq!(run.state(), "running");
         run.paused = true;
         assert_eq!(run.state(), "paused");
+    }
+
+    #[test]
+    fn parses_progress_detail() {
+        // A trimmed but faithful slice of `progress --verbose --json`: the summary keys,
+        // the extra detail keys, a coverage summary whose shape is Strix's, and the stream.
+        let payload = r#"{
+            "run": "r1", "dir": "/tmp/r1", "status": "running",
+            "start_time": "2026-10-05T11:54:50+00:00", "end_time": null,
+            "cost_usd": 0.0, "findings": 2, "coverage_gaps": 1,
+            "agents": {"total": 3, "completed": 2, "running": ["Reporter"], "failed": 0},
+            "todos": {"total": 4, "done": 3, "in_progress": 1, "pending": 0},
+            "usage": {"requests": 9, "input_tokens": 1000, "output_tokens": 20},
+            "findings_detail": [{"title": "RCE", "severity": "critical"},
+                                {"title": "SQLi", "severity": "high"}],
+            "coverage": {"summary": {"surfaces_reviewed": 5, "findings_filed": 2, "gaps": 7},
+                         "gaps": [{"message": "unexamined"}]},
+            "messages": [
+                {"id": 4, "session_id": "s", "agent_name": "Reporter", "role": "assistant",
+                 "type": "message", "text": "done", "tool": null,
+                 "at": "2026-10-05 12:13:12", "truncated": false},
+                {"id": 9, "session_id": "s", "agent_name": "Reporter", "role": "assistant",
+                 "type": "function_call", "text": "x=1", "tool": "shell",
+                 "at": "2026-10-05 12:13:20", "truncated": true}
+            ]
+        }"#;
+        let detail: ProgressDetail = serde_json::from_str(payload).unwrap();
+        assert_eq!(detail.run, "r1");
+        assert_eq!(detail.agents.completed, 2);
+        assert_eq!(detail.findings_count(), 2);
+        assert_eq!(detail.newest_message_id(), 9);
+        assert_eq!(detail.activity(), Some("Reporter"));
+        assert_eq!(detail.messages[1].kind, "function_call");
+        assert_eq!(detail.messages[1].tool.as_deref(), Some("shell"));
+        assert!(detail.messages[1].truncated);
+        let coverage = detail.coverage.unwrap();
+        assert_eq!(coverage.gap_count(99), 1);
+        assert_eq!(coverage.summary.unwrap().surfaces_reviewed, Some(5));
+    }
+
+    #[test]
+    fn coverage_count_falls_back_to_summary() {
+        let coverage: Coverage =
+            serde_json::from_str(r#"{"summary":{"gaps":7},"gaps":[]}"#).unwrap();
+        assert_eq!(coverage.gap_count(99), 7);
+        assert_eq!(Coverage::default().gap_count(3), 3);
     }
 }

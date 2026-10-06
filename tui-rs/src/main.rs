@@ -6,6 +6,7 @@ mod app;
 mod data;
 mod graph;
 mod signals;
+mod strix;
 mod theme;
 mod ui;
 
@@ -57,8 +58,10 @@ fn run(terminal: &mut Tui, interval: Duration) -> io::Result<()> {
         }
         app.start_poll_if_due(now);
         app.start_cairn_if_due(now);
+        app.start_detail_if_due(now);
         redraw |= app.pump(now);
         redraw |= app.pump_cairn(now);
+        redraw |= app.pump_detail(now);
         redraw |= app.tick(now);
 
         // The wait is bounded by the next timer, so an idle dashboard sleeps and a busy

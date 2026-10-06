@@ -5,6 +5,7 @@ mod cairn;
 mod detail;
 mod header;
 mod list;
+mod strix;
 
 use ratatui::layout::{Constraint, Layout};
 use ratatui::style::Style;
@@ -12,7 +13,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
-use crate::app::{App, Page, Target};
+use crate::app::{App, DetailPane, Page, Target};
 use crate::theme;
 
 /// Width of the left column: wide enough for a 23-char run name, a 9-char state and the
@@ -34,6 +35,13 @@ pub fn draw(frame: &mut Frame, app: &App) {
 
     match app.page() {
         Page::Cairn => cairn::draw(frame, body_area, app),
+        Page::Detail => {
+            let [left_area, modal_area] =
+                Layout::horizontal([Constraint::Length(LEFT_WIDTH), Constraint::Min(24)])
+                    .areas(body_area);
+            list::draw(frame, left_area, app);
+            strix::draw(frame, modal_area, app);
+        }
         Page::Dashboard => {
             let [left_area, detail_area] =
                 Layout::horizontal([Constraint::Length(LEFT_WIDTH), Constraint::Min(24)])
@@ -82,6 +90,28 @@ fn draw_footer(frame: &mut Frame, area: ratatui::layout::Rect, app: &App) {
                 ),
                 Span::styled(format!("target: {target}"), theme::accent()),
             ]
+        }
+        Page::Detail => {
+            let mut spans: Vec<Span> = vec![Span::styled(
+                "esc close   tab pane   ↑/↓ scroll   g/G top/end   r refetch   q quit   ",
+                theme::dim(),
+            )];
+            let pane = match app.detail_pane() {
+                DetailPane::Findings => "findings",
+                DetailPane::Stream => "stream",
+            };
+            spans.push(Span::styled(format!("pane: {pane}   "), theme::accent()));
+            if app.detail_pane() == DetailPane::Stream {
+                let tail = if app.detail_follow() {
+                    "follow: on (tail -f)".to_string()
+                } else if app.detail_new() > 0 {
+                    format!("paused · ↓ {} new", app.detail_new())
+                } else {
+                    "paused · ↑ scrolled".to_string()
+                };
+                spans.push(Span::styled(tail, theme::dim()));
+            }
+            spans
         }
     };
     if app.error().is_some() {

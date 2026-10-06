@@ -9,7 +9,8 @@ use std::time::{Duration, Instant};
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use crate::data::{
-    self, CairnData, CairnLogs, DataError, Project, ProjectGraph, RunProgress, Snapshot,
+    self, CairnData, CairnLogs, DataError, ProgressDetail, Project, ProjectGraph, RunProgress,
+    Snapshot,
 };
 use crate::graph::{self, Layout};
 
@@ -32,6 +33,7 @@ pub const CAIRN_LEGEND_ROWS: u16 = 1;
 pub enum Page {
     Dashboard,
     Cairn,
+    Detail,
 }
 
 /// On the dashboard, what `enter` acts on. `tab` toggles it, as the Ink list view does.
@@ -46,6 +48,25 @@ pub enum Target {
 pub enum CairnPane {
     Graph,
     Logs,
+}
+
+/// Which half of the Strix modal the scroll keys act on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DetailPane {
+    Findings,
+    Stream,
+}
+
+/// How the Strix modal's pane area splits between FINDINGS and the STREAM, in rows. The
+/// top block takes about forty percent (at least six rows), the stream keeps the majority,
+/// as the Ink modal settled on. A pure function so the drawing code and the follow-the-tail
+/// math cannot disagree about how tall the stream window is.
+pub fn detail_pane_split(panes: u16) -> (u16, u16) {
+    if panes == 0 {
+        return (0, 0);
+    }
+    let upper = ((panes as u32 * 40) / 100).max(6).min(panes as u32) as u16;
+    (upper, panes - upper)
 }
 
 /// How the Cairn body splits into the graph block and the logs block, in rows. A pure
@@ -117,6 +138,23 @@ pub struct App {
     last_pulse: Instant,
     term_cols: u16,
     term_rows: u16,
+
+    // --- the Strix detail modal -----------------------------------------------------
+    detail: Option<ProgressDetail>,
+    detail_error: Option<String>,
+    detail_has_db: bool,
+    detail_pane: DetailPane,
+    detail_scroll: usize,
+    detail_findings_scroll: usize,
+    detail_follow: bool,
+    detail_new: usize,
+    detail_prev_len: usize,
+    detail_prev_max: usize,
+    detail_baseline_id: i64,
+    detail_reset: bool,
+    detail_target: Option<(String, String)>,
+    detail_rx: Option<Receiver<Result<ProgressDetail, DataError>>>,
+    next_detail: Instant,
 }
 
 impl App {
@@ -159,6 +197,21 @@ impl App {
             last_pulse: now,
             term_cols: 132,
             term_rows: 42,
+            detail: None,
+            detail_error: None,
+            detail_has_db: true,
+            detail_pane: DetailPane::Stream,
+            detail_scroll: 0,
+            detail_findings_scroll: 0,
+            detail_follow: true,
+            detail_new: 0,
+            detail_prev_len: 0,
+            detail_prev_max: 0,
+            detail_baseline_id: 0,
+            detail_reset: true,
+            detail_target: None,
+            detail_rx: None,
+            next_detail: now,
         }
     }
 
@@ -320,6 +373,7 @@ impl App {
         self.term_rows = rows;
         self.recompute_layout(true);
         self.clamp_log_scroll();
+        self.clamp_detail_scroll();
         true
     }
 
@@ -385,6 +439,9 @@ impl App {
         let mut wait = self.next_poll.saturating_duration_since(now);
         if self.page == Page::Cairn {
             wait = wait.min(self.next_cairn.saturating_duration_since(now));
+        }
+        if self.page == Page::Detail {
+            wait = wait.min(self.next_detail.saturating_duration_since(now));
         }
         if self.animating() {
             let until_tick = (self.last_tick + TICK).saturating_duration_since(now);
@@ -576,6 +633,325 @@ impl App {
         self.log_scroll = self.log_scroll.min(max);
     }
 
+    // --- the Strix detail modal -----------------------------------------------------
+
+    pub fn detail(&self) -> Option<&ProgressDetail> {
+        self.detail.as_ref()
+    }
+
+    pub fn detail_error(&self) -> Option<&str> {
+        self.detail_error.as_deref()
+    }
+
+    pub fn detail_pane(&self) -> DetailPane {
+        self.detail_pane
+    }
+
+    pub fn detail_scroll(&self) -> usize {
+        self.detail_scroll
+    }
+
+    pub fn detail_findings_scroll(&self) -> usize {
+        self.detail_findings_scroll
+    }
+
+    pub fn detail_follow(&self) -> bool {
+        self.detail_follow
+    }
+
+    pub fn detail_new(&self) -> usize {
+        self.detail_new
+    }
+
+    /// The snapshot run the modal is showing, matched by workdir and run. The detail
+    /// payload does not carry `live`/`paused`/`pid`, so state is read from the same row the
+    /// list renders and a live scan can never read `stale` in the pane.
+    pub fn detail_run(&self) -> Option<&RunProgress> {
+        let (workdir, run) = self.detail_target.as_ref()?;
+        self.runs()
+            .iter()
+            .find(|r| &r.workdir == workdir && &r.run == run)
+    }
+
+    pub fn detail_state(&self) -> String {
+        if let Some(run) = self.detail_run() {
+            return run.state().to_string();
+        }
+        match self.detail.as_ref().and_then(|d| d.status.as_deref()) {
+            Some("running" | "in_progress") => "stale".to_string(),
+            Some(status) => status.to_string(),
+            None => "unknown".to_string(),
+        }
+    }
+
+    pub fn detail_pid(&self) -> Option<i64> {
+        self.detail_run().and_then(|run| run.pid)
+    }
+
+    pub fn detail_live(&self) -> bool {
+        self.detail_run().is_some_and(|run| run.live || run.paused)
+    }
+
+    pub fn detail_paused(&self) -> bool {
+        self.detail_run().is_some_and(|run| run.paused)
+    }
+
+    /// Whether the run has no `.state/agents.db` yet: the modal says so instead of drawing
+    /// an empty stream.
+    pub fn detail_no_db(&self) -> bool {
+        self.detail.is_some() && !self.detail_has_db
+    }
+
+    /// The panes' inner text width. The modal keeps the dashboard's left list, as the Ink
+    /// verbose view does, so the body is `cols - LEFT_WIDTH`; each pane border eats two more.
+    pub fn detail_inner_width(&self) -> usize {
+        (self.term_cols.saturating_sub(crate::ui::LEFT_WIDTH + 2)).max(20) as usize
+    }
+
+    pub fn detail_header_rows(&self) -> u16 {
+        if self.detail.is_some() {
+            3
+        } else {
+            1
+        }
+    }
+
+    /// The rows above the panes for a failed fetch and a missing `agents.db`: the error
+    /// keeps the last good panes below it, so both can show at once.
+    pub fn detail_banner_rows(&self) -> u16 {
+        (self.detail_error.is_some() as u16) + (self.detail_no_db() as u16)
+    }
+
+    /// The FINDINGS and STREAM inner heights, borders removed. One function so the scroll
+    /// keys, the follow math and the drawing all agree.
+    pub fn detail_pane_heights(&self) -> (u16, u16) {
+        let body = self.term_rows.saturating_sub(2);
+        let panes = body.saturating_sub(self.detail_header_rows() + self.detail_banner_rows());
+        let (upper, lower) = detail_pane_split(panes);
+        (
+            upper.saturating_sub(2).max(1),
+            lower.saturating_sub(2).max(1),
+        )
+    }
+
+    pub fn detail_findings_len(&self) -> usize {
+        self.detail.as_ref().map_or(0, |detail| {
+            crate::strix::build_findings(detail, self.detail_inner_width()).len()
+        })
+    }
+
+    pub fn detail_stream_len(&self) -> usize {
+        self.detail.as_ref().map_or(0, |detail| {
+            crate::strix::build_stream(detail, self.detail_inner_width()).len()
+        })
+    }
+
+    pub fn detail_findings_max_scroll(&self) -> usize {
+        self.detail_findings_len()
+            .saturating_sub(self.detail_pane_heights().0 as usize)
+    }
+
+    pub fn detail_max_scroll(&self) -> usize {
+        self.detail_stream_len()
+            .saturating_sub(self.detail_pane_heights().1 as usize)
+    }
+
+    /// Open the Strix modal on the selected run: reset the scroll and follow state and
+    /// fetch at once, so a reopen starts at the tail of a fresh payload, not an old offset.
+    pub fn open_detail(&mut self) {
+        let Some((workdir, run)) = self
+            .selected_run()
+            .map(|run| (run.workdir.clone(), run.run.clone()))
+        else {
+            return;
+        };
+        self.page = Page::Detail;
+        self.detail = None;
+        self.detail_error = None;
+        self.detail_has_db = true;
+        self.detail_pane = DetailPane::Stream;
+        self.detail_scroll = 0;
+        self.detail_findings_scroll = 0;
+        self.detail_follow = true;
+        self.detail_new = 0;
+        self.detail_prev_len = 0;
+        self.detail_prev_max = 0;
+        self.detail_baseline_id = 0;
+        self.detail_reset = true;
+        if workdir.is_empty() {
+            self.detail_target = None;
+            self.detail_error = Some("this run has no directory on disk".to_string());
+            return;
+        }
+        self.detail_target = Some((workdir, run));
+        self.next_detail = Instant::now();
+        self.start_detail_if_due(Instant::now());
+    }
+
+    pub fn close_detail(&mut self) {
+        self.page = Page::Dashboard;
+        self.detail_rx = None;
+    }
+
+    /// Start a detail fetch when one is due and none is in flight. Runs on a worker thread
+    /// so a slow CLI can never freeze the keys.
+    pub fn start_detail_if_due(&mut self, now: Instant) {
+        if self.page != Page::Detail || self.detail_rx.is_some() || now < self.next_detail {
+            return;
+        }
+        let Some((workdir, run)) = self.detail_target.clone() else {
+            return;
+        };
+        self.next_detail = now + self.interval;
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            let _ = tx.send(data::fetch_progress_detail(&workdir, &run));
+        });
+        self.detail_rx = Some(rx);
+    }
+
+    /// Refetch because the user pressed `r`, without waiting for the interval.
+    pub fn refetch_detail(&mut self) {
+        self.next_detail = Instant::now();
+        self.start_detail_if_due(Instant::now());
+    }
+
+    /// Collect a finished detail fetch. Returns whether anything changed on screen.
+    pub fn pump_detail(&mut self, now: Instant) -> bool {
+        if self.page != Page::Detail {
+            self.detail_rx = None;
+            return false;
+        }
+        let Some(rx) = &self.detail_rx else {
+            return false;
+        };
+        match rx.try_recv() {
+            Ok(result) => {
+                self.detail_rx = None;
+                self.apply_detail(result);
+                self.next_detail = now + self.interval;
+                true
+            }
+            Err(TryRecvError::Empty) => false,
+            Err(TryRecvError::Disconnected) => {
+                self.detail_rx = None;
+                self.detail_error = Some("the Strix detail fetch stopped unexpectedly".to_string());
+                self.next_detail = now + self.interval;
+                true
+            }
+        }
+    }
+
+    fn apply_detail(&mut self, result: Result<ProgressDetail, DataError>) {
+        match result {
+            Ok(detail) => {
+                self.detail_error = None;
+                self.detail_has_db = std::path::Path::new(&detail.dir)
+                    .join(".state")
+                    .join("agents.db")
+                    .is_file();
+                self.apply_detail_tail(detail);
+            }
+            Err(error) => {
+                // Keep the last good payload: the panes stay useful while the CLI is down.
+                self.detail_error = Some(error.to_string());
+                self.clamp_detail_scroll();
+            }
+        }
+    }
+
+    /// Follow-the-tail, the same intent the Ink stream pane has: stay pinned to the newest
+    /// entry unless the reader scrolled up, then hold still and count what arrived. A new
+    /// message is counted by id, so the sliding 200-message window cannot inflate the count.
+    fn apply_detail_tail(&mut self, detail: ProgressDetail) {
+        let stream_len = crate::strix::build_stream(&detail, self.detail_inner_width()).len();
+        let newest_id = detail.newest_message_id();
+        // Assign first: `detail_pane_heights` reads whether a payload is present (a header
+        // is three rows once it is), so measuring before the assignment would size the
+        // stream one row too tall and land the first tail one line above the bottom.
+        self.detail = Some(detail);
+        let stream_height = self.detail_pane_heights().1 as usize;
+        let new_max = stream_len.saturating_sub(stream_height);
+
+        if self.detail_reset {
+            self.detail_reset = false;
+            self.detail_prev_len = stream_len;
+            self.detail_prev_max = new_max;
+            self.detail_baseline_id = newest_id;
+            self.detail_scroll = new_max;
+            self.detail_follow = true;
+            self.detail_new = 0;
+            self.clamp_detail_scroll();
+            return;
+        }
+
+        let was_at_bottom = self.detail_scroll >= self.detail_prev_max;
+        let grew = stream_len > self.detail_prev_len;
+        let shift = stream_len as i64 - self.detail_prev_len as i64;
+        self.detail_prev_len = stream_len;
+        self.detail_prev_max = new_max;
+
+        // Follow only while the stream is focused. Tabbing to findings freezes it: a new
+        // arrival counts as paused rather than moving either pane.
+        if self.detail_follow && was_at_bottom && (self.detail_pane == DetailPane::Stream || !grew)
+        {
+            if self.detail_pane == DetailPane::Stream {
+                self.detail_scroll = new_max;
+            }
+            self.detail_new = 0;
+            if grew {
+                self.detail_baseline_id = newest_id;
+            }
+            self.clamp_detail_scroll();
+            return;
+        }
+
+        if self.detail_follow {
+            self.detail_follow = false;
+        }
+        if self.detail_baseline_id == 0 {
+            self.detail_baseline_id = newest_id;
+        }
+        self.detail_new = self
+            .detail
+            .as_ref()
+            .map(|detail| {
+                detail
+                    .messages
+                    .iter()
+                    .filter(|message| message.id > self.detail_baseline_id)
+                    .count()
+            })
+            .unwrap_or(0);
+        // When the window slides, lines leave the top: move the paused offset by the same
+        // amount so the messages on screen do not jump under the reader.
+        let target = (self.detail_scroll as i64 + shift.min(0))
+            .max(0)
+            .min(new_max as i64) as usize;
+        if target != self.detail_scroll {
+            self.detail_scroll = target;
+        }
+        self.clamp_detail_scroll();
+    }
+
+    fn clamp_detail_scroll(&mut self) {
+        let stream_max = self.detail_max_scroll();
+        self.detail_scroll = self.detail_scroll.min(stream_max);
+        let findings_max = self.detail_findings_max_scroll();
+        self.detail_findings_scroll = self.detail_findings_scroll.min(findings_max);
+    }
+
+    /// Scrolling down to the bottom resumes the tail; leaving it pauses.
+    fn set_detail_follow_at_bottom(&mut self, max: usize) {
+        if self.detail_scroll >= max {
+            self.detail_follow = true;
+            self.detail_new = 0;
+        } else {
+            self.detail_follow = false;
+            self.detail_baseline_id = self.detail.as_ref().map_or(0, |d| d.newest_message_id());
+        }
+    }
+
     // --- input ----------------------------------------------------------------------
 
     pub fn on_key(&mut self, key: KeyEvent) {
@@ -592,6 +968,7 @@ impl App {
         }
         match self.page {
             Page::Cairn => self.on_key_cairn(key),
+            Page::Detail => self.on_key_detail(key),
             Page::Dashboard => self.on_key_dashboard(key),
         }
     }
@@ -679,6 +1056,81 @@ impl App {
         }
     }
 
+    /// The Strix modal's keys, mirroring the Ink verbose view: esc/enter close, tab
+    /// switches panes, arrows and PgUp/PgDn scroll the focused one, g/G jump, r refetches.
+    fn on_key_detail(&mut self, key: KeyEvent) {
+        if matches!(key.code, KeyCode::Esc | KeyCode::Enter) {
+            self.close_detail();
+            return;
+        }
+        if key.code == KeyCode::Tab {
+            self.detail_pane = match self.detail_pane {
+                DetailPane::Findings => DetailPane::Stream,
+                DetailPane::Stream => DetailPane::Findings,
+            };
+            return;
+        }
+        if key.code == KeyCode::Char('r') {
+            self.refetch_detail();
+            return;
+        }
+
+        let (findings_height, stream_height) = self.detail_pane_heights();
+        let stream_max = self.detail_max_scroll();
+        let findings_max = self.detail_findings_max_scroll();
+        let page = match self.detail_pane {
+            DetailPane::Findings => findings_height,
+            DetailPane::Stream => stream_height,
+        } as isize;
+
+        let step = match key.code {
+            KeyCode::Up | KeyCode::Char('k') => -1isize,
+            KeyCode::Down | KeyCode::Char('j') => 1,
+            KeyCode::PageUp => -page,
+            KeyCode::PageDown => page,
+            _ => 0,
+        };
+        if step != 0 {
+            match self.detail_pane {
+                DetailPane::Findings => {
+                    let next = (self.detail_findings_scroll as isize + step)
+                        .clamp(0, findings_max as isize);
+                    self.detail_findings_scroll = next as usize;
+                }
+                DetailPane::Stream => {
+                    let next = (self.detail_scroll as isize + step).clamp(0, stream_max as isize);
+                    self.detail_scroll = next as usize;
+                    self.set_detail_follow_at_bottom(stream_max);
+                }
+            }
+            return;
+        }
+
+        let top = matches!(key.code, KeyCode::Home | KeyCode::Char('g'));
+        let end = matches!(key.code, KeyCode::End | KeyCode::Char('G'));
+        if !top && !end {
+            return;
+        }
+        match self.detail_pane {
+            DetailPane::Findings => {
+                self.detail_findings_scroll = if top { 0 } else { findings_max };
+            }
+            DetailPane::Stream => {
+                if top {
+                    self.detail_follow = false;
+                    self.detail_new = 0;
+                    self.detail_baseline_id =
+                        self.detail.as_ref().map_or(0, |d| d.newest_message_id());
+                    self.detail_scroll = 0;
+                } else {
+                    self.detail_follow = true;
+                    self.detail_new = 0;
+                    self.detail_scroll = stream_max;
+                }
+            }
+        }
+    }
+
     fn on_key_dashboard(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Up | KeyCode::Char('k') => self.select(-1),
@@ -689,11 +1141,10 @@ impl App {
                     Target::Cairn => Target::Run,
                 };
             }
-            KeyCode::Enter => {
-                if self.target == Target::Cairn {
-                    self.open_cairn();
-                }
-            }
+            KeyCode::Enter => match self.target {
+                Target::Cairn => self.open_cairn(),
+                Target::Run => self.open_detail(),
+            },
             KeyCode::Char('r') => {
                 // Refresh now: bypass the wait but still go through the worker thread.
                 self.next_poll = Instant::now();
