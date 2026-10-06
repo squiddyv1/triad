@@ -1330,7 +1330,8 @@ function App({interval}: {interval: number}) {
             )}
             {pendingDelete && (
               <Text color="yellow">
-                delete the {focus === 'graph' ? 'project' : 'run'} {focus === 'graph' ? run?.project : run?.run}? (y/n)
+                delete the {focus === 'graph' ? 'project' : 'run'} {focus === 'graph' ? run?.project : run?.run}?{' '}
+                {focus === 'run' && (run?.live || run?.paused) ? 'it will be stopped first (y/n)' : '(y/n)'}
               </Text>
             )}
             {pendingStackDown && (

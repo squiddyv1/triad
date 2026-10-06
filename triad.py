@@ -748,9 +748,6 @@ def cmd_control(args):
     workdir = Path(args.workdir).expanduser().resolve()
     pid = strix.read_pid(workdir) or _find_scan_pid(workdir)
     state = _pid_state(pid) if pid else "gone"
-    if state == "gone":
-        _err(f"no live scan recorded in {workdir}")
-        return 1
 
     if action == "delete":
         if not args.run:
@@ -760,9 +757,26 @@ def cmd_control(args):
         if not target.is_dir() or target.parent.name != "strix_runs":
             _err(f"not a run directory: {target}")
             return 1
+        # Deleting a run needs no live process, but a live one must be stopped first:
+        # removing the directory under it leaves it writing to a path that no longer
+        # exists. A SIGSTOPped scan ignores SIGTERM until it is continued, so it gets
+        # SIGCONT and then SIGTERM.
+        if state == "running":
+            _signal_scan(pid, signal.SIGTERM)
+            prefix = f"stopped the scan (pid {pid}), then "
+        elif state == "stopped":
+            _signal_scan(pid, signal.SIGCONT)
+            _signal_scan(pid, signal.SIGTERM)
+            prefix = f"continued and stopped the scan (pid {pid}), then "
+        else:
+            prefix = ""
         shutil.rmtree(target)
-        _ok(f"deleted run {args.run} (its findings are gone; a fed graph keeps its hints)")
+        _ok(f"{prefix}deleted run {args.run} (its findings are gone; a fed graph keeps its hints)")
         return 0
+
+    if state == "gone":
+        _err(f"no live scan recorded in {workdir}")
+        return 1
 
     if action == "pause":
         _signal_scan(pid, signal.SIGSTOP)
