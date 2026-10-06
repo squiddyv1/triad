@@ -19,7 +19,10 @@ use crate::data::{GraphNode, ProjectGraph};
 /// fades the same stub the pulse travels along.
 pub const FRONTIER_STUB: f64 = 6.0;
 /// Longest label written beside a node.
-pub const LABEL_WIDTH: usize = 20;
+pub const LABEL_WIDTH: usize = 30;
+/// A label may not be placed where it would leave a blank run longer than this many rows in
+/// one of its columns: a label is ink, and ink parked in an empty column is a hole.
+const MAX_LABEL_GAP: i32 = 3;
 /// Minimum separation between two marker centres, in columns and rows, before rounding.
 /// Chosen so that after rounding no two marker footprints can touch and merge in the
 /// measurement's dense-core clustering.
@@ -29,6 +32,17 @@ const MIN_DY: f64 = 5.0;
 const ITER: usize = 320;
 /// Keeps the drawing off the pane border.
 const MARGIN: f64 = 2.0;
+/// The relax is only a seed: the final picture is scaled to this share of the pane, small
+/// enough that the nodes stay one cluster instead of being flung to the corners and leaving
+/// a blank gulf through the middle.
+const TARGET_W: f64 = 0.58;
+const TARGET_H: f64 = 0.62;
+/// A node with no edge is drawn touching the nearest connected node, so a disconnected goal
+/// still reads as part of the picture rather than an island the eye cannot reach. The gap is
+/// set past `MIN_DX`/`MIN_DY` so the separation pass does not shove the docked node back off
+/// its row (which would reopen the gulf as a vertical one).
+const DOCK_GAP_X: f64 = 1.0;
+const DOCK_GAP_Y: f64 = 1.0;
 /// Above this many non-hint nodes the picture stops being a graph and becomes a hairball
 /// of merged markers. Rather than draw that, the pane says so.
 const MAX_DRAW_NODES: usize = 30;
@@ -217,7 +231,7 @@ pub fn layout(graph: &ProjectGraph, width: f64, min_height: f64) -> Layout {
     // --- seeded force-directed relax ---------------------------------------------
     let centre = (width / 2.0, height / 2.0);
     let mut pos: Vec<(f64, f64)> = Vec::with_capacity(n);
-    let seed_r = (width.min(height * 2.2) * 0.22).max(3.0);
+    let seed_r = (width.min(height * 2.2) * 0.20).max(3.0);
     for (i, node) in ordered.iter().enumerate() {
         if Kind::of(&node.kind) == Kind::Origin {
             pos.push(centre);
@@ -256,8 +270,6 @@ pub fn layout(graph: &ProjectGraph, width: f64, min_height: f64) -> Layout {
             let dx = pos[u].0 - pos[v].0;
             let dy = pos[u].1 - pos[v].1;
             let d = (dx * dx + dy * dy).sqrt().max(0.01);
-            // Springs a touch stronger than the textbook relax, so a chain stays a chain
-            // rather than being pulled apart by the repulsion of everything else.
             let force = d * d / k * 2.5;
             disp[u].0 -= dx / d * force;
             disp[u].1 -= dy / d * force;
@@ -266,13 +278,12 @@ pub fn layout(graph: &ProjectGraph, width: f64, min_height: f64) -> Layout {
         }
         for i in 0..n {
             if Some(i) == origin_index {
-                // The origin is the root of the picture and stays at the pane centre.
                 disp[i] = (0.0, 0.0);
                 pos[i] = centre;
                 continue;
             }
-            disp[i].0 += (centre.0 - pos[i].0) * 0.03;
-            disp[i].1 += (centre.1 - pos[i].1) * 0.03;
+            disp[i].0 += (centre.0 - pos[i].0) * 0.12;
+            disp[i].1 += (centre.1 - pos[i].1) * 0.12;
             let (dx, dy) = disp[i];
             let d = (dx * dx + dy * dy).sqrt();
             if d > 0.001 {
@@ -287,18 +298,14 @@ pub fn layout(graph: &ProjectGraph, width: f64, min_height: f64) -> Layout {
     }
     separate(&mut pos, width, height);
 
-    // Stretch the cluster to occupy the pane, keeping the shape the relax found. The
-    // bounds cap the distortion so a two-node graph does not become a straight line
-    // across the screen. The stretch runs about the origin, so the root stays central.
+    // Compress the cluster to a readable share of the pane, keeping the shape the relax
+    // found, and dock any node with no link next to the nearest connected one so the picture
+    // stays a single cluster rather than two groups with a gulf between them.
+    let target_w = (width * TARGET_W).max(30.0);
+    let target_h = (height * TARGET_H).max(7.0);
     let (minx, maxx, miny, maxy) = marker_bounds(&ordered, &pos);
     let spanx = (maxx - minx).max(1.0);
     let spany = (maxy - miny).max(1.0);
-    let target_w = if hints.is_empty() {
-        width * 0.74
-    } else {
-        width * 0.66
-    };
-    let target_h = height * 0.74;
     let fit_x = (target_w / spanx).clamp(0.65, 2.4);
     let fit_y = (target_h / spany).clamp(0.65, 2.4);
     let (midx, midy) = match origin_index {
@@ -309,9 +316,9 @@ pub fn layout(graph: &ProjectGraph, width: f64, min_height: f64) -> Layout {
         p.0 = midx + (p.0 - midx) * fit_x;
         p.1 = midy + (p.1 - midy) * fit_y;
     }
+    dock_isolated(&ordered, &links, &mut pos);
     separate(&mut pos, width, height);
 
-    // Whole cells from here on: markers and labels must land on real terminal cells.
     for p in pos.iter_mut() {
         p.0 = p.0.round().clamp(MARGIN, width - MARGIN);
         p.1 = p.1.round().clamp(MARGIN, height - MARGIN);
@@ -338,8 +345,7 @@ pub fn layout(graph: &ProjectGraph, width: f64, min_height: f64) -> Layout {
         })
         .collect();
 
-    // --- hints in the margin beside the cluster ----------------------------------
-    let hint_on_left = place_hints(&mut nodes, &hints, height);
+    place_hints(&mut nodes, &hints, width, height);
 
     // Centre the markers before choosing labels, so the margin beside a hint is the room
     // it will really have once the picture is centred. A final recentre after the labels
@@ -348,10 +354,15 @@ pub fn layout(graph: &ProjectGraph, width: f64, min_height: f64) -> Layout {
 
     // --- labels, computed from the static layout only ----------------------------
     let mut forbidden = forbidden_cells(&nodes, graph);
+    let mut ink = build_ink_columns(&nodes, graph);
+    // Stubs are routed after labels, so mark a provisional ray for each now. Without it a
+    // label could land just past where a stub will go and strand a gap the label pass, seeing
+    // no ink there, thought was safe.
+    mark_provisional_stubs(&nodes, graph, &mut ink);
     place_labels(
         &mut nodes,
-        hint_on_left,
         &mut forbidden,
+        &mut ink,
         width as i32,
         height as i32,
     );
@@ -593,6 +604,59 @@ fn separate(pos: &mut [(f64, f64)], width: f64, height: f64) {
     }
 }
 
+/// A node with no link sits where the relax dropped it, which for a disconnected goal is out
+/// past the cluster and leaves a gulf the eye reads as a second group. Draw such a node
+/// touching the nearest connected node instead, docked along the axis that leaves the
+/// cluster, so the whole picture is one blob.
+fn dock_isolated(nodes: &[&GraphNode], links: &[(usize, usize)], pos: &mut [(f64, f64)]) {
+    let n = pos.len();
+    let mut degree = vec![0usize; n];
+    for &(u, v) in links {
+        degree[u] += 1;
+        degree[v] += 1;
+    }
+    let connected: Vec<usize> = (0..n).filter(|&i| degree[i] > 0).collect();
+    if connected.is_empty() {
+        return;
+    }
+    let (mut cx, mut cy) = (0.0, 0.0);
+    for &i in &connected {
+        cx += pos[i].0;
+        cy += pos[i].1;
+    }
+    let centroid = (cx / connected.len() as f64, cy / connected.len() as f64);
+
+    for i in 0..n {
+        if degree[i] > 0 {
+            continue;
+        }
+        let mut best = connected[0];
+        let mut best_d = f64::MAX;
+        for &j in &connected {
+            let dx = pos[i].0 - pos[j].0;
+            let dy = pos[i].1 - pos[j].1;
+            let d = dx * dx + dy * dy;
+            if d < best_d {
+                best_d = d;
+                best = j;
+            }
+        }
+        let (bx, by) = pos[best];
+        let (mbw, mbh) = Kind::of(&nodes[best].kind).size();
+        let (mhw, mhh) = Kind::of(&nodes[i].kind).size();
+        let out_x = bx - centroid.0;
+        let out_y = by - centroid.1;
+        if out_x.abs() >= out_y.abs() {
+            // Dock in the same row: a horizontal neighbour cannot leave a vertical hole.
+            let dir = if out_x >= 0.0 { 1.0 } else { -1.0 };
+            pos[i] = (bx + dir * ((mbw + mhw) as f64 / 2.0 + DOCK_GAP_X), by);
+        } else {
+            let dir = if out_y >= 0.0 { 1.0 } else { -1.0 };
+            pos[i] = (bx, by + dir * ((mbh + mhh) as f64 / 2.0 + DOCK_GAP_Y));
+        }
+    }
+}
+
 /// The bounding box of the marker footprints for `nodes` at `pos`.
 fn marker_bounds(nodes: &[&GraphNode], pos: &[(f64, f64)]) -> (f64, f64, f64, f64) {
     let mut minx = f64::MAX;
@@ -611,11 +675,12 @@ fn marker_bounds(nodes: &[&GraphNode], pos: &[(f64, f64)]) -> (f64, f64, f64, f6
     (minx, maxx, miny, maxy)
 }
 
-/// Place hint markers in the margin just outside the cluster. Returns whether they landed
-/// on the left (which the label placement uses to face the labels outward).
-fn place_hints(nodes: &mut Vec<PlacedNode>, hints: &[&GraphNode], height: f64) -> bool {
+/// Place hint markers in the margin just outside the cluster. They stack in one column that
+/// touches the cluster, so the hints read as floating beside the graph rather than parked in
+/// a separate part of the pane.
+fn place_hints(nodes: &mut Vec<PlacedNode>, hints: &[&GraphNode], width: f64, height: f64) {
     if hints.is_empty() {
-        return true;
+        return;
     }
     let (minx, maxx, miny, maxy) = nodes.iter().fold(
         (f64::MAX, f64::MIN, f64::MAX, f64::MIN),
@@ -632,12 +697,10 @@ fn place_hints(nodes: &mut Vec<PlacedNode>, hints: &[&GraphNode], height: f64) -
     let (hw, hh) = Kind::Hint.size();
     let gap = 2.0;
     let left = minx - gap - f64::from(hw) / 2.0;
-    let on_left = left >= MARGIN + f64::from(hw) / 2.0;
-    let column = if on_left {
-        left
-    } else {
-        maxx + gap + f64::from(hw) / 2.0
-    };
+    let right = maxx + gap + f64::from(hw) / 2.0;
+    let on_left =
+        left >= MARGIN + f64::from(hw) / 2.0 || right > width - MARGIN - f64::from(hw) / 2.0;
+    let column = if on_left { left } else { right };
     let step = f64::from(hh) + 2.0;
     let total = hints.len() as f64 * step - 2.0;
     let start = ((miny + maxy) / 2.0 - total / 2.0).max(MARGIN);
@@ -655,7 +718,6 @@ fn place_hints(nodes: &mut Vec<PlacedNode>, hints: &[&GraphNode], height: f64) -
             label_at: None,
         });
     }
-    on_left
 }
 
 /// The cells a label must keep clear of: a one-cell moat around every marker and a
@@ -696,6 +758,115 @@ fn forbidden_cells(nodes: &[PlacedNode], graph: &ProjectGraph) -> HashSet<(i32, 
     out
 }
 
+/// The exact cells that already carry ink (markers and concluded links) as a column index to
+/// the rows inked there. Label placement uses it to avoid stranding a blank run in a column.
+fn build_ink_columns(nodes: &[PlacedNode], graph: &ProjectGraph) -> HashMap<i32, Vec<i32>> {
+    let mut out: HashMap<i32, Vec<i32>> = HashMap::new();
+    for node in nodes {
+        let (c, r, w, h) = node.marker_rect();
+        for y in r..r + h {
+            for x in c..c + w {
+                out.entry(x).or_default().push(y);
+            }
+        }
+    }
+    let pos: HashMap<&str, (f64, f64)> = nodes
+        .iter()
+        .map(|node| (node.id.as_str(), (node.x, node.y)))
+        .collect();
+    for edge in &graph.edges {
+        let Some(target) = edge.to.as_deref().and_then(|to| pos.get(to).copied()) else {
+            continue;
+        };
+        for from in &edge.from {
+            let Some(&source) = pos.get(from.as_str()) else {
+                continue;
+            };
+            let (mut x0, mut y0) = (source.0.round() as i32, source.1.round() as i32);
+            let (x1, y1) = (target.0.round() as i32, target.1.round() as i32);
+            let dx = (x1 - x0).abs();
+            let sx = if x0 < x1 { 1 } else { -1 };
+            let dy = -(y1 - y0).abs();
+            let sy = if y0 < y1 { 1 } else { -1 };
+            let mut err = dx + dy;
+            loop {
+                out.entry(x0).or_default().push(y0);
+                if x0 == x1 && y0 == y1 {
+                    break;
+                }
+                let e2 = 2 * err;
+                if e2 >= dy {
+                    err += dy;
+                    x0 += sx;
+                }
+                if e2 <= dx {
+                    err += dx;
+                    y0 += sy;
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Whether a label on `row` would leave a blank run longer than `max_gap` in any column it
+/// covers. A column with no ink at all is safe: a lone label row is not a gap.
+fn label_gap_ok(col: i32, row: i32, len: i32, ink: &HashMap<i32, Vec<i32>>, max_gap: i32) -> bool {
+    for x in col..col + len {
+        let Some(rows) = ink.get(&x) else { continue };
+        let nearest = rows
+            .iter()
+            .map(|r| (r - row).abs())
+            .min()
+            .unwrap_or(i32::MAX);
+        if nearest - 1 > max_gap {
+            return false;
+        }
+    }
+    true
+}
+
+/// Roughly the cells the frontier stubs will occupy, so label placement can avoid stranding a
+/// gap against them. The real stubs are routed after labels; this provisional pass uses the
+/// same directions with no labels placed yet.
+fn mark_provisional_stubs(
+    nodes: &[PlacedNode],
+    graph: &ProjectGraph,
+    ink: &mut HashMap<i32, Vec<i32>>,
+) {
+    let dirs = stub_directions(nodes, graph);
+    let pos: HashMap<&str, (f64, f64)> = nodes
+        .iter()
+        .map(|node| (node.id.as_str(), (node.x, node.y)))
+        .collect();
+    for (index, edge) in graph.edges.iter().enumerate() {
+        if edge.to.is_some() {
+            continue;
+        }
+        let Some(edge_dirs) = dirs.get(index) else {
+            continue;
+        };
+        for (k, from) in edge.from.iter().enumerate() {
+            let (Some(&(sx, sy)), Some(&(dx, dy))) = (pos.get(from.as_str()), edge_dirs.get(k))
+            else {
+                continue;
+            };
+            let (x0, y0) = (sx.round() as i32, sy.round() as i32);
+            let (x1, y1) = (
+                (sx + dx * FRONTIER_STUB).round() as i32,
+                (sy + dy * FRONTIER_STUB).round() as i32,
+            );
+            let (ax, ay) = (x1 - x0, y1 - y0);
+            let steps = ax.abs().max(ay.abs()).max(1);
+            for step in 0..=steps {
+                let x = x0 + ax * step / steps;
+                let y = y0 + ay * step / steps;
+                ink.entry(x).or_default().push(y);
+            }
+        }
+    }
+}
+
 /// Mark a line's cells and their eight neighbours. A touch coarse, but the one-cell moat
 /// is exactly the margin a label needs to stay out of a stroke.
 fn raster_line(a: (i32, i32), b: (i32, i32), out: &mut HashSet<(i32, i32)>) {
@@ -732,13 +903,26 @@ fn raster_line(a: (i32, i32), b: (i32, i32), out: &mut HashSet<(i32, i32)>) {
 /// consulted, so the pulse can never move a label.
 fn place_labels(
     nodes: &mut [PlacedNode],
-    hint_on_left: bool,
     forbidden: &mut HashSet<(i32, i32)>,
+    ink: &mut HashMap<i32, Vec<i32>>,
     width: i32,
     height: i32,
 ) {
     let marker_rects: Vec<(i32, i32, i32, i32)> =
         nodes.iter().map(PlacedNode::marker_rect).collect();
+
+    // A hint label faces away from the cluster, so the ones on the left and the ones on the
+    // right never share empty columns and strand a vertical gap between their rows.
+    let core_x: Vec<f64> = nodes
+        .iter()
+        .filter(|node| node.kind != Kind::Hint)
+        .map(|node| node.x)
+        .collect();
+    let core_mid = if core_x.is_empty() {
+        0.0
+    } else {
+        core_x.iter().sum::<f64>() / core_x.len() as f64
+    };
 
     let mut order: Vec<usize> = (0..nodes.len()).collect();
     order.sort_by_key(|&i| {
@@ -753,6 +937,16 @@ fn place_labels(
         (priority, i)
     });
 
+    // Ordinal of each hint in the stack, used to alternate their label rows.
+    let mut hint_rank = vec![0usize; nodes.len()];
+    let mut hint_seen = 0usize;
+    for i in 0..nodes.len() {
+        if nodes[i].kind == Kind::Hint {
+            hint_rank[i] = hint_seen;
+            hint_seen += 1;
+        }
+    }
+
     for i in order {
         let full = crate::graph::short_label(&nodes[i].label, LABEL_WIDTH);
         let (c0, r0, w, h) = marker_rects[i];
@@ -764,25 +958,40 @@ fn place_labels(
             if len < 3 {
                 continue;
             }
-            let centred = c0 + (w - len).max(0) / 2;
             let right = (c0 + w + 1, midrow);
             let left = (c0 - len - 1, midrow);
+            let centred = c0 + (w - len).max(0) / 2;
+            let above = (centred, r0 - 2);
+            let below = (centred, r0 + h + 1);
             let mut offsets: Vec<(i32, i32)> = Vec::new();
-            if nodes[i].kind == Kind::Hint && hint_on_left {
-                offsets.push(left);
-                offsets.push(right);
+            if nodes[i].kind == Kind::Hint {
+                let away_left = nodes[i].x < core_mid;
+                let near_col = if away_left { left.0 } else { right.0 };
+                let far_col = if away_left { right.0 } else { left.0 };
+                // Alternate hints between a side label and one a row above, so two stacked
+                // hint labels land on near-adjacent rows in the same empty margin.
+                if hint_rank[i].is_multiple_of(2) {
+                    offsets.extend([(near_col, midrow), (far_col, midrow), above, below]);
+                } else {
+                    offsets.extend([
+                        (near_col, r0 - 2),
+                        (near_col, r0 + h + 1),
+                        (far_col, midrow),
+                        above,
+                    ]);
+                }
             } else {
-                offsets.push(right);
-                offsets.push(left);
+                offsets.extend([right, left, above, below]);
             }
-            offsets.push((centred, r0 - 2));
-            offsets.push((centred, r0 + h + 1));
-            for (col, row) in offsets {
+            for &(col, row) in &offsets {
                 if col < 0 || row < 0 || col + len > width || row >= height {
                     continue;
                 }
                 let clear = (col..col + len).all(|x| !forbidden.contains(&(x, row)));
                 if !clear {
+                    continue;
+                }
+                if !label_gap_ok(col, row, len, ink, MAX_LABEL_GAP) {
                     continue;
                 }
                 chosen = Some((text, col, row));
@@ -796,6 +1005,9 @@ fn place_labels(
                 forbidden.insert((x, row - 1));
                 forbidden.insert((x, row));
                 forbidden.insert((x, row + 1));
+            }
+            for x in col..(col + nodes[i].label.chars().count() as i32) {
+                ink.entry(x).or_default().push(row);
             }
         }
     }

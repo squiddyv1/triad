@@ -9,7 +9,7 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::symbols::Marker;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::canvas::{Canvas, Line as CanvasLine, Points};
+use ratatui::widgets::canvas::{Canvas, Context, Line as CanvasLine, Points};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Frame;
 
@@ -20,6 +20,8 @@ use crate::ui::elide_line;
 
 /// Pulse positions along a frontier stub, so the marker visibly moves between frames.
 const PULSE_STEPS: u64 = 10;
+/// Radius of the small open ring a frontier stub ends in, in cells.
+const STUB_RING: f64 = 0.45;
 
 pub fn draw(frame: &mut Frame, body: Rect, app: &App) {
     let (graph_rows, log_rows) = app::cairn_split_body(body.height);
@@ -133,7 +135,9 @@ fn draw_canvas(frame: &mut Frame, area: Rect, layout: &GraphLayout, app: &App) {
                     };
                     for (source, stub) in edge.sources.iter().zip(edge.stubs.iter()) {
                         // A frontier is a short spoke leaving its node and fading out,
-                        // never a line to nowhere.
+                        // never a line to nowhere. It ends in a small open ring so the
+                        // stop reads as deliberate, and one hairline keeps it plainly
+                        // distinct from the solid concluded links.
                         let (sx, sy) = *source;
                         let (ex, ey) = *stub;
                         for step in 0..3 {
@@ -147,6 +151,7 @@ fn draw_canvas(frame: &mut Frame, area: Rect, layout: &GraphLayout, app: &App) {
                                 fade(base, 1.0 - from * 0.6),
                             ));
                         }
+                        draw_ring(ctx, cx(ex), cy(ey), base);
                         if pulsing {
                             let fraction = ((pulse + index as u64 * 3) % (PULSE_STEPS + 1)) as f64
                                 / PULSE_STEPS as f64;
@@ -158,9 +163,10 @@ fn draw_canvas(frame: &mut Frame, area: Rect, layout: &GraphLayout, app: &App) {
                     }
                 } else if let Some((tx, ty)) = edge.target {
                     // A concluded edge is a continuous link whose ends the marker blocks
-                    // then cover, so it plainly terminates at two nodes.
+                    // then cover, so it plainly terminates at two nodes. It is drawn
+                    // several dot-rows thick so the eye reads a solid stroke, not dashes.
                     for (sx, sy) in &edge.sources {
-                        ctx.draw(&CanvasLine::new(cx(*sx), cy(*sy), cx(tx), cy(ty), color));
+                        thick_link(ctx, cx(*sx), cy(*sy), cx(tx), cy(ty), color);
                     }
                 }
             }
@@ -169,6 +175,38 @@ fn draw_canvas(frame: &mut Frame, area: Rect, layout: &GraphLayout, app: &App) {
 
     draw_markers(frame.buffer_mut(), area, layout);
     draw_labels(frame.buffer_mut(), area, layout);
+}
+
+/// Draw a link as a solid band: sample along the stroke and, in each cell the stroke passes
+/// through, raise three dots stacked inside that one cell. Keeping the band to a single cell
+/// row is what makes it read as a solid line without inflating into a node-sized blob.
+fn thick_link(ctx: &mut Context, x0: f64, y0: f64, x1: f64, y1: f64, color: Color) {
+    let dx = x1 - x0;
+    let dy = y1 - y0;
+    let len = (dx * dx + dy * dy).sqrt().max(0.001);
+    let steps = (len * 4.0).ceil().max(1.0) as i32;
+    let mut dots: Vec<(f64, f64)> = Vec::with_capacity((steps as usize + 1) * 3);
+    for s in 0..=steps {
+        let t = f64::from(s) / f64::from(steps);
+        let x = x0 + dx * t;
+        let row = (y0 + dy * t).floor();
+        dots.push((x, row + 0.2));
+        dots.push((x, row + 0.5));
+        dots.push((x, row + 0.8));
+    }
+    ctx.draw(&Points::new(&dots, color));
+}
+
+/// A small open ring drawn at the end of a frontier stub, so the stub stops on purpose
+/// rather than looking like a link that ran out of ink.
+fn draw_ring(ctx: &mut Context, x: f64, y: f64, color: Color) {
+    let ring = [
+        (x, y + STUB_RING),
+        (x + STUB_RING, y),
+        (x, y - STUB_RING),
+        (x - STUB_RING, y),
+    ];
+    ctx.draw(&Points::new(&ring, color));
 }
 
 /// A node is a filled block of cells, at least 3x3, over the edges already drawn. The
@@ -276,7 +314,7 @@ fn label_style(node: &PlacedNode) -> Style {
 /// The legend under the canvas: what the symbols mean, and the one-line path summary.
 fn legend(frame: &mut Frame, area: Rect, app: &App) {
     let mut spans: Vec<Span<'static>> = vec![
-        Span::styled("● fact ", Style::new().fg(theme::PATH_NODE)),
+        Span::styled("● fact (dim off-path) ", Style::new().fg(theme::PATH_NODE)),
         Span::styled("✦ intent ", Style::new().fg(theme::PATH_EDGE)),
         Span::styled("○ hint ", Style::new().fg(theme::HINT)),
         Span::styled("◉ origin ", Style::new().fg(theme::ORIGIN)),
