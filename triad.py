@@ -796,44 +796,8 @@ def _tui_bin():
     return _repo_root() / "tui-rs" / "target" / "release" / "triad-tui"
 
 
-def _ink_requested():
-    """`TRIAD_TUI=ink` is a one-stage escape hatch back to the previous dashboard."""
-    return os.environ.get("TRIAD_TUI", "").strip().lower() == "ink"
-
-
-def _ink_tui(args):
-    """Start the Ink dashboard. Only reachable through TRIAD_TUI=ink now: tui/ still
-    exists for one more stage, but nothing defaults to it."""
-    tui = _repo_root() / "tui"
-    if not (tui / "node_modules" / "ink").is_dir():
-        _err("the Ink dashboard's dependencies are not installed")
-        print("     it is the previous dashboard; install them with:  cd tui && npm install")
-        return 1
-    node = _node_bin()
-    if not node:
-        _err("node was not found; the Ink dashboard needs Node 18 or newer")
-        return 1
-    version = _node_version(node)
-    major = _node_major(version)
-    if major is None or major < 18:
-        _err(f"node {version or 'unknown'} at {node} is older than 18; the Ink dashboard needs 18 or newer")
-        return 1
-    cmd = [node, "--import", "tsx/esm", str(tui / "src" / "index.tsx")]
-    if getattr(args, "interval", None):
-        cmd += ["--interval", str(args.interval)]
-    env = dict(os.environ)
-    env["TRIAD_PY"] = str(_repo_root() / "triad.py")
-    env.setdefault("TRIAD_PYTHON", sys.executable)
-    try:
-        return subprocess.call(cmd, cwd=str(tui), env=env)
-    except KeyboardInterrupt:
-        return 0
-
-
 def cmd_tui(args):
     """Open the dashboard: every run, its progress, its telemetry, its controls."""
-    if _ink_requested():
-        return _ink_tui(args)
     binary = _tui_bin()
     if not binary.is_file():
         _err(f"the dashboard is not built: {binary} is missing")
@@ -1791,33 +1755,6 @@ def _uv_bin():
         if candidate and Path(candidate).is_file():
             return candidate
     return None
-
-
-def _node_bin():
-    node_dir = os.environ.get("NODE_DIR") or str(Path.home() / ".local" / "opt" / "node")
-    for candidate in (shutil.which("node"),
-                      str(Path(node_dir) / "bin" / "node"),
-                      str(Path.home() / ".local" / "bin" / "node")):
-        if candidate and Path(candidate).is_file():
-            return candidate
-    return None
-
-
-def _node_version(node):
-    try:
-        out = subprocess.run([node, "--version"], stdout=subprocess.PIPE,
-                             stderr=subprocess.DEVNULL, text=True, check=False)
-    except OSError:
-        return None
-    return out.stdout.strip() or None
-
-
-def _node_major(version):
-    # The installer parses `node --version` the same way: strip the v, take the major.
-    try:
-        return int(version.lstrip("v").split(".", 1)[0])
-    except (AttributeError, ValueError):
-        return None
 
 
 def _worker_cli():
@@ -2781,14 +2718,11 @@ def cmd_auth(args):
 
 
 def _dashboard_available():
-    """Whether the dashboard could open: the built Rust binary, or the Ink hatch.
+    """Whether the dashboard could open: the built Rust binary.
 
     cmd_home uses this to fall back silently; cmd_tui still owns the message
     that names what is missing for an explicit `triad tui`.
     """
-    if _ink_requested():
-        tui = _repo_root() / "tui"
-        return (tui / "node_modules" / "ink").is_dir() and bool(_node_bin())
     binary = _tui_bin()
     return binary.is_file() and os.access(binary, os.X_OK)
 

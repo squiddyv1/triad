@@ -347,8 +347,7 @@ profile, `--no-modify-path`) when cargo is missing, then builds the dashboard wi
 `cargo build --release` in `tui-rs/`. The toolchain and the build are skipped by
 `--no-tui`, and `RUST_INSTALL_METHOD=none` downgrades them to a report. A build that
 fails is reported as a failed step but never blocks the rest of the install, so the CLI
-keeps working without it. The previous Ink dashboard in `tui/` is still reachable with
-`TRIAD_TUI=ink` for one stage, but nothing defaults to it.
+keeps working without it.
 
 ### 4.8 Not built yet
 

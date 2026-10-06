@@ -146,7 +146,7 @@ dispatch.yaml         worker pool, model routing, concurrency caps
 dispatch.local.yaml   no-Docker and arm64 fallback
 contracts/            the handoff schema and the rules-of-engagement template
 plugin/               the strix_* and cairn_* tools
-tui-rs/               the terminal dashboard (Rust); tui/ is the retired Ink one
+tui-rs/               the terminal dashboard (Rust)
 mcp/cairn_mcp.py      the Cairn graph as an MCP server
 assets/               the banner and the mark
 ```
