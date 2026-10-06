@@ -11,7 +11,7 @@ use ratatui::Frame;
 use crate::app::App;
 use crate::data::{self, RunProgress, TodoDetail};
 use crate::theme;
-use crate::ui::{progress_bar, SEVERITY_ORDER};
+use crate::ui::{elide_lines, progress_bar, SEVERITY_ORDER};
 
 pub fn draw(frame: &mut Frame, area: Rect, app: &App) {
     if let Some(error) = app.error() {
@@ -34,7 +34,10 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &App) {
     // and telemetry blocks at the bottom of the pane.
     let strix = strix_lines(run);
     let cairn_height: u16 = if run.project.is_some() { 6 } else { 3 };
-    let telemetry_height: u16 = 6;
+    // The sparkline only earns a row when there are samples behind it: an empty labelled
+    // row was Stage 1's bug. Without a run process there is nothing to plot, so the block
+    // is one row shorter.
+    let telemetry_height: u16 = if app.cpu_history().is_empty() { 5 } else { 6 };
     let fixed = cairn_height + telemetry_height;
     let strix_height = (strix.len() as u16 + 2)
         .min(area.height.saturating_sub(fixed))
@@ -57,13 +60,16 @@ fn draw_error(frame: &mut Frame, area: Rect, error: &str) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
     frame.render_widget(
-        Paragraph::new(vec![
-            Line::from(Span::styled(error.to_string(), Style::new().fg(Color::Red))),
-            Line::from(Span::styled(
-                "keeping the last good snapshot; the next poll retries",
-                theme::dim(),
-            )),
-        ])
+        Paragraph::new(elide_lines(
+            vec![
+                Line::from(Span::styled(error.to_string(), Style::new().fg(Color::Red))),
+                Line::from(Span::styled(
+                    "keeping the last good snapshot; the next poll retries",
+                    theme::dim(),
+                )),
+            ],
+            inner.width,
+        ))
         .wrap(Wrap { trim: false }),
         inner,
     );
@@ -73,7 +79,7 @@ fn draw_strix(frame: &mut Frame, area: Rect, lines: Vec<Line<'static>>) {
     let block = panel("STRIX");
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    frame.render_widget(Paragraph::new(lines), inner);
+    frame.render_widget(Paragraph::new(elide_lines(lines, inner.width)), inner);
 }
 
 /// The reader sees the whole Strix block at a glance: run, state, agents, todos,
@@ -318,7 +324,7 @@ fn draw_cairn(frame: &mut Frame, area: Rect, run: &RunProgress, app: &App) {
             ],
         ));
     }
-    frame.render_widget(Paragraph::new(lines), inner);
+    frame.render_widget(Paragraph::new(elide_lines(lines, inner.width)), inner);
 }
 
 fn draw_telemetry(frame: &mut Frame, area: Rect, app: &App) {
@@ -344,10 +350,25 @@ fn draw_telemetry(frame: &mut Frame, area: Rect, app: &App) {
         )],
     );
 
+    if app.cpu_history().is_empty() {
+        // No samples: drop the whole row rather than leave `cpu` labelled over nothing.
+        frame.render_widget(
+            Paragraph::new(elide_lines(
+                vec![proc_line, dispatcher, poll_line],
+                inner.width,
+            )),
+            inner,
+        );
+        return;
+    }
+
     let [text_area, spark_area] =
         Layout::vertical([Constraint::Length(3), Constraint::Min(1)]).areas(inner);
     frame.render_widget(
-        Paragraph::new(vec![proc_line, dispatcher, poll_line]),
+        Paragraph::new(elide_lines(
+            vec![proc_line, dispatcher, poll_line],
+            text_area.width,
+        )),
         text_area,
     );
 

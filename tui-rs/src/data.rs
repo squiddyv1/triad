@@ -376,6 +376,165 @@ pub fn fetch_snapshot() -> Result<Snapshot, DataError> {
     serde_json::from_str(&out).map_err(DataError::Json)
 }
 
+// --- the Cairn page's two payloads ------------------------------------------------
+
+/// `graph --json`: the layout-ready project graph, mirroring `ProjectGraph` in the Ink app.
+/// `to` is null on an intent that has not concluded; that is the frontier the canvas draws
+/// as a stub reaching forward rather than a line to nowhere.
+#[allow(dead_code)]
+#[derive(Debug, Default, Clone, Deserialize)]
+pub struct ProjectGraph {
+    #[serde(default)]
+    pub project: GraphProject,
+    #[serde(default)]
+    pub nodes: Vec<GraphNode>,
+    #[serde(default)]
+    pub edges: Vec<GraphEdge>,
+    #[serde(default)]
+    pub counts: GraphCounts,
+    #[serde(default)]
+    pub path: Vec<PathStep>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Default, Clone, Deserialize)]
+pub struct GraphProject {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub status: String,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Default, Clone, Deserialize)]
+pub struct GraphNode {
+    #[serde(default)]
+    pub id: String,
+    /// `origin`, `goal`, `fact` or `hint`.
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub label: String,
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub hop: i64,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Default, Clone, Deserialize)]
+pub struct GraphEdge {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub from: Vec<String>,
+    #[serde(default)]
+    pub to: Option<String>,
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub worker: Option<String>,
+    #[serde(default)]
+    pub label: String,
+}
+
+impl GraphEdge {
+    pub fn is_concluded(&self) -> bool {
+        self.status == "concluded"
+    }
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Default, Clone, Deserialize)]
+pub struct GraphCounts {
+    #[serde(default)]
+    pub facts: i64,
+    #[serde(default)]
+    pub hints: i64,
+    #[serde(default)]
+    pub intents: i64,
+    #[serde(default)]
+    pub open: i64,
+    #[serde(default)]
+    pub concluded: i64,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Default, Clone, Deserialize)]
+pub struct PathStep {
+    #[serde(default)]
+    pub fact: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub via: Option<String>,
+    #[serde(default)]
+    pub worker: Option<String>,
+}
+
+/// `cairn-logs --json`: the tail and where it came from. `source: "none"` is a normal
+/// answer, not an error: the pane explains it rather than showing an empty box.
+#[allow(dead_code)]
+#[derive(Debug, Default, Clone, Deserialize)]
+pub struct CairnLogs {
+    #[serde(default)]
+    pub source: String,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub container: Option<String>,
+    #[serde(default)]
+    pub lines: Vec<String>,
+}
+
+/// Both Cairn page payloads, fetched together on one worker thread. `graph` is `None`
+/// when the run has no linked project: there is nothing to ask the CLI for, and the page
+/// says so rather than inventing a graph.
+pub struct CairnData {
+    pub graph: Option<Result<ProjectGraph, DataError>>,
+    pub logs: Result<CairnLogs, DataError>,
+}
+
+/// Fetch the graph and the log tail for the Cairn page. The graph is only requested when
+/// a project is linked; the logs are useful on their own, so they are always requested.
+pub fn fetch_cairn(linked: Option<String>) -> CairnData {
+    let graph = linked.map(|project| fetch_graph(&project));
+    CairnData {
+        graph,
+        logs: fetch_cairn_logs(200),
+    }
+}
+
+/// `triad graph --project <id> --json`.
+pub fn fetch_graph(project: &str) -> Result<ProjectGraph, DataError> {
+    let (python, script) = cli();
+    let args = vec![
+        script,
+        "graph".to_string(),
+        "--project".to_string(),
+        project.to_string(),
+        "--json".to_string(),
+    ];
+    let out = run_command(&python, &args, DEFAULT_TIMEOUT)?;
+    serde_json::from_str(&out).map_err(DataError::Json)
+}
+
+/// `triad cairn-logs --json --lines <n>`.
+pub fn fetch_cairn_logs(lines: usize) -> Result<CairnLogs, DataError> {
+    let (python, script) = cli();
+    let args = vec![
+        script,
+        "cairn-logs".to_string(),
+        "--json".to_string(),
+        "--lines".to_string(),
+        lines.to_string(),
+    ];
+    let out = run_command(&python, &args, DEFAULT_TIMEOUT)?;
+    serde_json::from_str(&out).map_err(DataError::Json)
+}
+
 /// Human sizes for tokens and memory: "18M", "279k", "1.4G".
 pub fn human(n: Option<i64>) -> String {
     let Some(n) = n else {

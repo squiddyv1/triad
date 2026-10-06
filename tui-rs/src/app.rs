@@ -8,16 +8,67 @@ use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
-use crate::data::{self, DataError, Project, RunProgress, Snapshot};
+use crate::data::{
+    self, CairnData, CairnLogs, DataError, Project, ProjectGraph, RunProgress, Snapshot,
+};
+use crate::graph::{self, Layout};
 
 /// The spinner cadence: ten frames, roughly one revolution per second. The frame only
 /// advances while something is live, so an idle dashboard never redraws on its own.
 pub const TICK: Duration = Duration::from_millis(100);
+/// The frontier marker's cadence, as the brief asks: roughly 200ms per step.
+pub const PULSE_TICK: Duration = Duration::from_millis(200);
 const HISTORY_LEN: usize = 60;
 const CLK_TCK: f64 = 100.0; // Linux userspace default
 /// A poll result must be noticed promptly, but an idle loop should still sleep. This caps
 /// the event wait so a completed background poll is never stuck behind a long blocking read.
 const MAX_WAIT: Duration = Duration::from_millis(150);
+/// One line of the graph block is the legend, under the canvas.
+pub const CAIRN_LEGEND_ROWS: u16 = 1;
+
+/// Which page owns the body. The dashboard is the Stage 1 view; the Cairn page is the
+/// graph over the logs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Page {
+    Dashboard,
+    Cairn,
+}
+
+/// On the dashboard, what `enter` acts on. `tab` toggles it, as the Ink list view does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Target {
+    Run,
+    Cairn,
+}
+
+/// Which half of the Cairn page the scroll keys act on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CairnPane {
+    Graph,
+    Logs,
+}
+
+/// How the Cairn body splits into the graph block and the logs block, in rows. A pure
+/// function so the drawing code and the scroll math cannot disagree about the pane sizes.
+pub fn cairn_split_body(body: u16) -> (u16, u16) {
+    if body < 6 {
+        return (body, 0);
+    }
+    let graph = ((body as u32 * 62) / 100).max(5).min(body as u32) as u16;
+    (graph, body - graph)
+}
+
+/// The canvas rows available inside the graph block (borders and legend removed).
+pub fn cairn_graph_canvas_height(rows: u16) -> u16 {
+    let (graph, _) = cairn_split_body(rows.saturating_sub(2));
+    graph.saturating_sub(2 + CAIRN_LEGEND_ROWS).max(1)
+}
+
+/// The usable rows inside the logs block (borders removed).
+pub fn cairn_log_inner_height(rows: u16) -> u16 {
+    let (_, logs) = cairn_split_body(rows.saturating_sub(2));
+    logs.saturating_sub(2).max(1)
+}
 
 /// A point sample from `/proc/<pid>`; CPU is a delta between two of these.
 #[derive(Debug, Clone, Copy)]
@@ -43,6 +94,29 @@ pub struct App {
     proc_rss: HashMap<i64, Option<i64>>,
     cpu_history: Vec<u64>,
     history_dir: String,
+
+    // --- the Cairn page -------------------------------------------------------------
+    page: Page,
+    target: Target,
+    cairn_pane: CairnPane,
+    graph: Option<ProjectGraph>,
+    graph_error: Option<String>,
+    graph_layout: Option<Layout>,
+    graph_scroll: u16,
+    logs: Option<CairnLogs>,
+    logs_error: Option<String>,
+    log_scroll: usize,
+    log_follow: bool,
+    log_new: usize,
+    log_prev_len: usize,
+    log_prev_last: String,
+    log_reset: bool,
+    cairn_rx: Option<Receiver<CairnData>>,
+    next_cairn: Instant,
+    pulse: u64,
+    last_pulse: Instant,
+    term_cols: u16,
+    term_rows: u16,
 }
 
 impl App {
@@ -64,6 +138,27 @@ impl App {
             proc_rss: HashMap::new(),
             cpu_history: Vec::new(),
             history_dir: String::new(),
+            page: Page::Dashboard,
+            target: Target::Run,
+            cairn_pane: CairnPane::Graph,
+            graph: None,
+            graph_error: None,
+            graph_layout: None,
+            graph_scroll: 0,
+            logs: None,
+            logs_error: None,
+            log_scroll: 0,
+            log_follow: true,
+            log_new: 0,
+            log_prev_len: 0,
+            log_prev_last: String::new(),
+            log_reset: true,
+            cairn_rx: None,
+            next_cairn: now,
+            pulse: 0,
+            last_pulse: now,
+            term_cols: 132,
+            term_rows: 42,
         }
     }
 
@@ -142,6 +237,90 @@ impl App {
         self.proc_rss.get(&pid).copied().flatten()
     }
 
+    // --- Cairn page reads -----------------------------------------------------------
+
+    pub fn page(&self) -> Page {
+        self.page
+    }
+
+    pub fn target(&self) -> Target {
+        self.target
+    }
+
+    pub fn cairn_pane(&self) -> CairnPane {
+        self.cairn_pane
+    }
+
+    pub fn graph(&self) -> Option<&ProjectGraph> {
+        self.graph.as_ref()
+    }
+
+    pub fn graph_error(&self) -> Option<&str> {
+        self.graph_error.as_deref()
+    }
+
+    pub fn graph_layout(&self) -> Option<&Layout> {
+        self.graph_layout.as_ref()
+    }
+
+    pub fn graph_scroll(&self) -> u16 {
+        self.graph_scroll
+    }
+
+    pub fn graph_max_scroll(&self) -> u16 {
+        let visible = cairn_graph_canvas_height(self.term_rows);
+        self.graph_layout
+            .as_ref()
+            .map_or(0, |layout| layout.max_scroll(visible))
+    }
+
+    pub fn logs(&self) -> Option<&CairnLogs> {
+        self.logs.as_ref()
+    }
+
+    pub fn logs_error(&self) -> Option<&str> {
+        self.logs_error.as_deref()
+    }
+
+    pub fn log_scroll(&self) -> usize {
+        self.log_scroll
+    }
+
+    pub fn log_follow(&self) -> bool {
+        self.log_follow
+    }
+
+    pub fn log_new(&self) -> usize {
+        self.log_new
+    }
+
+    pub fn pulse(&self) -> u64 {
+        self.pulse
+    }
+
+    /// The frontier pulses only for an active project with open work, the gate the Ink
+    /// version uses. A completed or stopped project has nothing to pulse.
+    pub fn pulse_active(&self) -> bool {
+        self.page == Page::Cairn
+            && self
+                .graph
+                .as_ref()
+                .is_some_and(|graph| graph.project.status == "active" && graph.counts.open > 0)
+    }
+
+    /// Record the terminal size; a change re-flows the graph and must reset the scroll so
+    /// the picture never jumps to a stale offset. Returns whether anything changed.
+    pub fn set_size(&mut self, cols: u16, rows: u16) -> bool {
+        if cols == self.term_cols && rows == self.term_rows {
+            return false;
+        }
+        self.term_cols = cols;
+        self.term_rows = rows;
+        self.recompute_layout(true);
+        self.clamp_log_scroll();
+        true
+    }
+
     // --- the loop's timing hooks ----------------------------------------------------
 
     /// Start a poll when one is due and none is already in flight. The fetch runs on a
@@ -182,22 +361,36 @@ impl App {
         }
     }
 
-    /// Advance the spinner while something is live. Returns whether to redraw.
+    /// Advance the spinner while something is live, and the frontier marker while the
+    /// project is active. Returns whether to redraw.
     pub fn tick(&mut self, now: Instant) -> bool {
-        if !self.animating() || now < self.last_tick + TICK {
-            return false;
+        let mut redraw = false;
+        if self.animating() && now >= self.last_tick + TICK {
+            self.spinner = self.spinner.wrapping_add(1);
+            self.last_tick = now;
+            redraw = true;
         }
-        self.spinner = self.spinner.wrapping_add(1);
-        self.last_tick = now;
-        true
+        if self.pulse_active() && now >= self.last_pulse + PULSE_TICK {
+            self.pulse = self.pulse.wrapping_add(1);
+            self.last_pulse = now;
+            redraw = true;
+        }
+        redraw
     }
 
     /// How long the event wait may block before timers want attention again.
     pub fn wait_hint(&self, now: Instant) -> Duration {
         let mut wait = self.next_poll.saturating_duration_since(now);
+        if self.page == Page::Cairn {
+            wait = wait.min(self.next_cairn.saturating_duration_since(now));
+        }
         if self.animating() {
             let until_tick = (self.last_tick + TICK).saturating_duration_since(now);
             wait = wait.min(until_tick);
+        }
+        if self.pulse_active() {
+            let until_pulse = (self.last_pulse + PULSE_TICK).saturating_duration_since(now);
+            wait = wait.min(until_pulse);
         }
         wait.min(MAX_WAIT)
     }
@@ -206,19 +399,299 @@ impl App {
         self.should_quit
     }
 
+    // --- the Cairn page's fetch lifecycle -------------------------------------------
+
+    /// Open the Cairn page: reset its scroll and follow state and fetch immediately, so
+    /// reopen starts at the top of a fresh fetch rather than an old offset.
+    pub fn open_cairn(&mut self) {
+        self.page = Page::Cairn;
+        self.cairn_pane = CairnPane::Graph;
+        self.graph = None;
+        self.graph_error = None;
+        self.graph_layout = None;
+        self.graph_scroll = 0;
+        self.logs = None;
+        self.logs_error = None;
+        self.log_scroll = 0;
+        self.log_follow = true;
+        self.log_new = 0;
+        self.log_reset = true;
+        self.pulse = 0;
+        self.next_cairn = Instant::now();
+        self.start_cairn_if_due(Instant::now());
+    }
+
+    pub fn close_cairn(&mut self) {
+        self.page = Page::Dashboard;
+        self.cairn_rx = None;
+    }
+
+    /// Start a Cairn fetch when one is due and none is in flight. Both payloads travel on
+    /// one worker thread so a slow CLI can never freeze the keys.
+    pub fn start_cairn_if_due(&mut self, now: Instant) {
+        if self.page != Page::Cairn || self.cairn_rx.is_some() || now < self.next_cairn {
+            return;
+        }
+        self.next_cairn = now + self.interval;
+        let linked = self.selected_run().and_then(|run| run.project.clone());
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            let _ = tx.send(data::fetch_cairn(linked));
+        });
+        self.cairn_rx = Some(rx);
+    }
+
+    /// Refetch because the user pressed `r`, without waiting for the interval.
+    pub fn refetch_cairn(&mut self) {
+        self.next_cairn = Instant::now();
+        self.start_cairn_if_due(Instant::now());
+    }
+
+    /// Collect a finished Cairn fetch. Returns whether anything changed on screen.
+    pub fn pump_cairn(&mut self, now: Instant) -> bool {
+        if self.page != Page::Cairn {
+            self.cairn_rx = None;
+            return false;
+        }
+        let Some(rx) = &self.cairn_rx else {
+            return false;
+        };
+        match rx.try_recv() {
+            Ok(data) => {
+                self.cairn_rx = None;
+                self.apply_cairn(data);
+                self.next_cairn = now + self.interval;
+                true
+            }
+            Err(TryRecvError::Empty) => false,
+            Err(TryRecvError::Disconnected) => {
+                self.cairn_rx = None;
+                self.graph_error = Some("the Cairn fetch stopped unexpectedly".to_string());
+                self.next_cairn = now + self.interval;
+                true
+            }
+        }
+    }
+
+    fn apply_cairn(&mut self, data: CairnData) {
+        match data.graph {
+            None => {
+                self.graph = None;
+                self.graph_error = None;
+            }
+            Some(Ok(graph)) => {
+                self.graph = Some(graph);
+                self.graph_error = None;
+            }
+            Some(Err(error)) => {
+                self.graph = None;
+                self.graph_error = Some(error.to_string());
+            }
+        }
+        self.recompute_layout(false);
+
+        match data.logs {
+            Ok(logs) => {
+                self.logs_error = None;
+                self.apply_log_tail(logs);
+            }
+            Err(error) => {
+                self.logs = None;
+                self.logs_error = Some(error.to_string());
+                self.log_new = 0;
+            }
+        }
+    }
+
+    /// Follow-the-tail, the same intent the Ink log pane has: stay pinned to the bottom
+    /// unless the reader scrolled up, and then count what arrived while they read.
+    fn apply_log_tail(&mut self, logs: CairnLogs) {
+        let len = logs.lines.len();
+        let last = logs.lines.last().cloned().unwrap_or_default();
+        let height = cairn_log_inner_height(self.term_rows) as usize;
+
+        if self.log_reset {
+            self.log_reset = false;
+            self.log_prev_len = len;
+            self.log_prev_last = last;
+            self.log_follow = true;
+            self.log_new = 0;
+            self.log_scroll = len.saturating_sub(height);
+            self.logs = Some(logs);
+            return;
+        }
+
+        let added = len as i64 - self.log_prev_len as i64;
+        let changed = last != self.log_prev_last;
+        let was_bottom = self.log_scroll + height >= self.log_prev_len;
+        self.log_prev_len = len;
+        self.log_prev_last = last;
+
+        if self.log_follow && was_bottom {
+            self.log_scroll = len.saturating_sub(height);
+            self.log_new = 0;
+        } else {
+            if self.log_follow {
+                self.log_follow = false;
+            }
+            if added > 0 || changed {
+                self.log_new += if added > 0 { added as usize } else { 1 };
+            }
+            if added < 0 {
+                // The window slid: lines left the top, so keep the same lines on screen.
+                self.log_scroll = self.log_scroll.saturating_sub((-added) as usize);
+            }
+        }
+        self.logs = Some(logs);
+    }
+
+    /// Rebuild the graph layout from the current graph and terminal size. A resize
+    /// re-clamps the scroll; a fresh graph leaves it alone unless there is no layout yet.
+    fn recompute_layout(&mut self, resize: bool) {
+        if resize {
+            self.graph_scroll = 0;
+        }
+        let Some(graph) = &self.graph else {
+            self.graph_layout = None;
+            self.graph_scroll = 0;
+            return;
+        };
+        let width = self.term_cols.saturating_sub(2).max(1) as f64;
+        let height = cairn_graph_canvas_height(self.term_rows) as f64;
+        self.graph_layout = Some(graph::layout(graph, width, height));
+        let max = self.graph_max_scroll();
+        self.graph_scroll = self.graph_scroll.min(max);
+    }
+
+    /// The log pane's scroll window, clamped to the tail.
+    fn clamp_log_scroll(&mut self) {
+        let Some(logs) = &self.logs else {
+            self.log_scroll = 0;
+            return;
+        };
+        let height = cairn_log_inner_height(self.term_rows) as usize;
+        let max = logs.lines.len().saturating_sub(height);
+        self.log_scroll = self.log_scroll.min(max);
+    }
+
     // --- input ----------------------------------------------------------------------
 
     pub fn on_key(&mut self, key: KeyEvent) {
         if key.kind != KeyEventKind::Press {
             return;
         }
-        match key.code {
-            KeyCode::Char('q') => self.should_quit = true,
-            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.should_quit = true;
+        if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            self.should_quit = true;
+            return;
+        }
+        if key.code == KeyCode::Char('q') {
+            self.should_quit = true;
+            return;
+        }
+        match self.page {
+            Page::Cairn => self.on_key_cairn(key),
+            Page::Dashboard => self.on_key_dashboard(key),
+        }
+    }
+
+    /// The Cairn page's keys, mirroring the Ink modal: esc/enter close, tab switches
+    /// panes, arrows and PgUp/PgDn scroll the focused one, g/G jump, r refetches.
+    fn on_key_cairn(&mut self, key: KeyEvent) {
+        if matches!(key.code, KeyCode::Esc | KeyCode::Enter) {
+            self.close_cairn();
+            return;
+        }
+        if key.code == KeyCode::Tab {
+            self.cairn_pane = match self.cairn_pane {
+                CairnPane::Graph => CairnPane::Logs,
+                CairnPane::Logs => CairnPane::Graph,
+            };
+            return;
+        }
+        if key.code == KeyCode::Char('r') {
+            self.refetch_cairn();
+            return;
+        }
+
+        let graph_height = cairn_graph_canvas_height(self.term_rows);
+        let log_height = cairn_log_inner_height(self.term_rows) as usize;
+        let graph_max = self.graph_max_scroll();
+        let log_max = self
+            .logs
+            .as_ref()
+            .map_or(0, |logs| logs.lines.len().saturating_sub(log_height));
+
+        let step = match key.code {
+            KeyCode::Up | KeyCode::Char('k') => -1,
+            KeyCode::Down | KeyCode::Char('j') => 1,
+            KeyCode::PageUp => -(graph_height as isize),
+            KeyCode::PageDown => graph_height as isize,
+            _ => 0,
+        };
+        if step != 0 {
+            match self.cairn_pane {
+                CairnPane::Graph => {
+                    let next = (self.graph_scroll as isize + step).clamp(0, graph_max as isize);
+                    self.graph_scroll = next as u16;
+                }
+                CairnPane::Logs => {
+                    let next = (self.log_scroll as isize + step).clamp(0, log_max as isize);
+                    self.log_scroll = next as usize;
+                    self.set_log_follow_at_bottom(log_max);
+                }
             }
+            return;
+        }
+
+        let top = matches!(key.code, KeyCode::Home | KeyCode::Char('g'));
+        let end = matches!(key.code, KeyCode::End | KeyCode::Char('G'));
+        if !top && !end {
+            return;
+        }
+        match self.cairn_pane {
+            CairnPane::Graph => {
+                self.graph_scroll = if top { 0 } else { graph_max };
+            }
+            CairnPane::Logs => {
+                if top {
+                    self.log_follow = false;
+                    self.log_new = 0;
+                    self.log_scroll = 0;
+                } else {
+                    self.log_follow = true;
+                    self.log_new = 0;
+                    self.log_scroll = log_max;
+                }
+            }
+        }
+    }
+
+    /// Scrolling down to the bottom resumes the tail; leaving it pauses and clears the
+    /// "new" badge only when the reader is back at the bottom.
+    fn set_log_follow_at_bottom(&mut self, log_max: usize) {
+        if self.log_scroll >= log_max {
+            self.log_follow = true;
+            self.log_new = 0;
+        } else {
+            self.log_follow = false;
+        }
+    }
+
+    fn on_key_dashboard(&mut self, key: KeyEvent) {
+        match key.code {
             KeyCode::Up | KeyCode::Char('k') => self.select(-1),
             KeyCode::Down | KeyCode::Char('j') => self.select(1),
+            KeyCode::Tab => {
+                self.target = match self.target {
+                    Target::Run => Target::Cairn,
+                    Target::Cairn => Target::Run,
+                };
+            }
+            KeyCode::Enter => {
+                if self.target == Target::Cairn {
+                    self.open_cairn();
+                }
+            }
             KeyCode::Char('r') => {
                 // Refresh now: bypass the wait but still go through the worker thread.
                 self.next_poll = Instant::now();

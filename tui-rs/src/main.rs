@@ -4,6 +4,7 @@
 
 mod app;
 mod data;
+mod graph;
 mod signals;
 mod theme;
 mod ui;
@@ -48,19 +49,31 @@ fn run(terminal: &mut Tui, interval: Duration) -> io::Result<()> {
 
     loop {
         let now = Instant::now();
-        app.start_poll_if_due(now);
-        let polled = app.pump(now);
-        let ticked = app.tick(now);
-        if polled || ticked {
-            terminal.draw(|frame| ui::draw(frame, &app))?;
+        // The layout math needs the real terminal size; querying it each pass also picks
+        // up a resize so the graph re-flows instead of drawing at a stale width.
+        let mut redraw = false;
+        if let Ok(size) = terminal.size() {
+            redraw |= app.set_size(size.width, size.height);
         }
+        app.start_poll_if_due(now);
+        app.start_cairn_if_due(now);
+        redraw |= app.pump(now);
+        redraw |= app.pump_cairn(now);
+        redraw |= app.tick(now);
 
         // The wait is bounded by the next timer, so an idle dashboard sleeps and a busy
-        // one redraws only when the spinner or a poll actually moves.
+        // one redraws only when the spinner, the pulse or a poll actually moves.
         if event::poll(app.wait_hint(now))? {
             if let Event::Key(key) = event::read()? {
                 app.on_key(key);
+                // A key can change the page, the selection or a scroll offset; repaint
+                // straight away rather than waiting for the next poll.
+                redraw = true;
             }
+        }
+
+        if redraw {
+            terminal.draw(|frame| ui::draw(frame, &app))?;
         }
 
         if app.should_quit() || signals::terminated() {
