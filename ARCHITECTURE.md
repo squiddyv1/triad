@@ -242,12 +242,12 @@ script tracks).
 
 Every path is overridable, so nothing is machine-specific: `TRIAD_HOME` (the script's own
 directory), `CAIRN_DIR` (`$TRIAD_HOME/cairn`), `HERMES_HOME` (`~/.hermes`), `BIN_DIR`
-(`~/.local/bin`), `ENGAGEMENTS` (`~/engagements`), `NODE_DIR` (`~/.local/opt/node`), plus
-`UV_INSTALL_METHOD`, `DOCKER_INSTALL_METHOD`, `WORKER_INSTALL_METHOD`,
-`NODE_INSTALL_METHOD` and `TUI_INSTALL_METHOD` to downgrade any layer to a report.
+(`~/.local/bin`), `ENGAGEMENTS` (`~/engagements`), `CARGO_HOME` (`~/.cargo`), plus
+`UV_INSTALL_METHOD`, `DOCKER_INSTALL_METHOD`, `WORKER_INSTALL_METHOD` and
+`RUST_INSTALL_METHOD` to downgrade any layer to a report.
 
-Docker and uv are installed when missing, since Cairn needs both, and Node is installed
-for the dashboard. That needed care on derivatives:
+Docker and uv are installed when missing, since Cairn needs both, and Rust is installed
+(via rustup) to build the dashboard. That needed care on derivatives:
 derivatives: Kali, Parrot, Mint and Pop are not distros Docker publishes packages for, so
 `get.docker.com` takes its `*)` branch, maps the distro to `debian` while keeping
 `VERSION_ID`, and writes a source for a suite that does not exist
@@ -308,8 +308,10 @@ findings, so read the artifacts and the log rather than the status field alone.
 ### 4.7 The dashboard
 
 Bare `triad` opens the dashboard, which is the normal way in; `triad tui` is the explicit
-form and is what a caller that needs its exit code uses. It is an Ink (React for terminals)
-app over `triad runs --json`: one poll of that one command, so the dashboard cannot
+form and is what a caller that needs its exit code uses. It is a Rust binary (Ratatui over
+crossterm) at `tui-rs/target/release/triad-tui`, built by `install.sh`; the launcher hands
+it `TRIAD_PY` (this repo's `triad.py`) and `TRIAD_PYTHON`, so the app shells out to the same
+CLI the terminal uses. It polls `triad runs --json`: one command, so the dashboard cannot
 disagree with the CLI about what is running. It shows
 the runs, the Strix progress of the selected one, the Cairn project that run fed into, and
 telemetry gathered where it actually lives: `docker stats` for the sandbox and the Cairn
@@ -336,15 +338,17 @@ first, then agents and todos with status, findings, coverage, usage and cost, an
 `strix.log` tail last, refetched on the same interval.
 
 `enter` on the CAIRN target opens the project graph and the Cairn logs. The graph comes from
-`triad graph --json` (nodes by hop, intents as edges, the open frontier pulsing on Ink's
-shared animation frame) and the logs from `triad cairn-logs --json`, both refetched only
-while the modal is open.
+`triad graph --json` (nodes by hop, intents as edges, the open frontier pulsing on the
+dashboard's shared animation frame) and the logs from `triad cairn-logs --json`, both
+refetched only while the modal is open.
 
-`install.sh` installs Node 18 or newer from the official prebuilt tarball (no root, no
-distro package) and the app's dependencies by default, so `triad tui` works after a fresh
-install; `--no-tui` skips both, and `NODE_INSTALL_METHOD` / `TUI_INSTALL_METHOD` downgrade
-either to a report. A dashboard install that fails is reported as a failed step but never
-blocks the rest of the install, so the CLI keeps working without it.
+`install.sh` installs Rust with rustup's official non-interactive installer (minimal
+profile, `--no-modify-path`) when cargo is missing, then builds the dashboard with
+`cargo build --release` in `tui-rs/`. The toolchain and the build are skipped by
+`--no-tui`, and `RUST_INSTALL_METHOD=none` downgrades them to a report. A build that
+fails is reported as a failed step but never blocks the rest of the install, so the CLI
+keeps working without it. The previous Ink dashboard in `tui/` is still reachable with
+`TRIAD_TUI=ink` for one stage, but nothing defaults to it.
 
 ### 4.8 Not built yet
 

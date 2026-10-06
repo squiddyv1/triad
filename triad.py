@@ -791,33 +791,65 @@ def cmd_control(args):
     return 0
 
 
-def cmd_tui(args):
-    """Open the dashboard: every run, its progress, its telemetry, its controls."""
+def _tui_bin():
+    """The Rust dashboard binary the installer builds and `triad` starts."""
+    return _repo_root() / "tui-rs" / "target" / "release" / "triad-tui"
+
+
+def _ink_requested():
+    """`TRIAD_TUI=ink` is a one-stage escape hatch back to the previous dashboard."""
+    return os.environ.get("TRIAD_TUI", "").strip().lower() == "ink"
+
+
+def _ink_tui(args):
+    """Start the Ink dashboard. Only reachable through TRIAD_TUI=ink now: tui/ still
+    exists for one more stage, but nothing defaults to it."""
     tui = _repo_root() / "tui"
     if not (tui / "node_modules" / "ink").is_dir():
-        _err("the dashboard's dependencies are not installed yet")
-        print("     run ./install.sh (it installs Node and the dashboard; --no-tui skips it)")
+        _err("the Ink dashboard's dependencies are not installed")
+        print("     it is the previous dashboard; install them with:  cd tui && npm install")
         return 1
     node = _node_bin()
     if not node:
-        _err("node was not found; the dashboard needs Node 18 or newer")
-        print("     run ./install.sh (it installs Node and writes it to your shell rc; --no-tui skips it)")
+        _err("node was not found; the Ink dashboard needs Node 18 or newer")
         return 1
     version = _node_version(node)
     major = _node_major(version)
     if major is None or major < 18:
-        _err(f"node {version or 'unknown'} at {node} is older than 18; the dashboard needs 18 or newer")
+        _err(f"node {version or 'unknown'} at {node} is older than 18; the Ink dashboard needs 18 or newer")
         return 1
     cmd = [node, "--import", "tsx/esm", str(tui / "src" / "index.tsx")]
     if getattr(args, "interval", None):
         cmd += ["--interval", str(args.interval)]
-    # The app shells out to this CLI for its state, so it has to be told where it is:
-    # its cwd is the tui directory, where no triad.py exists.
     env = dict(os.environ)
     env["TRIAD_PY"] = str(_repo_root() / "triad.py")
     env.setdefault("TRIAD_PYTHON", sys.executable)
     try:
         return subprocess.call(cmd, cwd=str(tui), env=env)
+    except KeyboardInterrupt:
+        return 0
+
+
+def cmd_tui(args):
+    """Open the dashboard: every run, its progress, its telemetry, its controls."""
+    if _ink_requested():
+        return _ink_tui(args)
+    binary = _tui_bin()
+    if not binary.is_file():
+        _err(f"the dashboard is not built: {binary} is missing")
+        print("     build it:  cargo build --release   (in tui-rs/)")
+        print("     or run ./install.sh, which builds it; --no-tui skips it")
+        return 1
+    cmd = [str(binary)]
+    if getattr(args, "interval", None):
+        # The binary takes whole seconds; give it one rather than a float it would ignore.
+        cmd += ["--interval", str(max(1, round(args.interval)))]
+    # The app shells out to this CLI for its state, so it has to be told where it is.
+    env = dict(os.environ)
+    env["TRIAD_PY"] = str(_repo_root() / "triad.py")
+    env.setdefault("TRIAD_PYTHON", sys.executable)
+    try:
+        return subprocess.call(cmd, cwd=str(_repo_root()), env=env)
     except KeyboardInterrupt:
         return 0
 
@@ -2749,19 +2781,16 @@ def cmd_auth(args):
 
 
 def _dashboard_available():
-    """Whether the dashboard could open: node >= 18 and its deps are on disk.
+    """Whether the dashboard could open: the built Rust binary, or the Ink hatch.
 
     cmd_home uses this to fall back silently; cmd_tui still owns the message
     that names what is missing for an explicit `triad tui`.
     """
-    tui = _repo_root() / "tui"
-    if not (tui / "node_modules" / "ink").is_dir():
-        return False
-    node = _node_bin()
-    if not node:
-        return False
-    major = _node_major(_node_version(node))
-    return major is not None and major >= 18
+    if _ink_requested():
+        tui = _repo_root() / "tui"
+        return (tui / "node_modules" / "ink").is_dir() and bool(_node_bin())
+    binary = _tui_bin()
+    return binary.is_file() and os.access(binary, os.X_OK)
 
 
 def _on_tty():
@@ -2807,7 +2836,7 @@ def cmd_home(args):
         _ok(f"dispatcher running (pid {pid}, log {DISPATCH_LOG})")
     else:
         _warn("dispatcher not running (no projects will move without it)")
-    if (_repo_root() / "tui" / "node_modules" / "ink").is_dir():
+    if _dashboard_available():
         _ok("dashboard ready (triad tui)")
     if not _cairn_up() or pid is None:
         print("  Start the stack:  triad up")

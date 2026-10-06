@@ -28,12 +28,11 @@ git clone https://github.com/squiddyv1/triad.git && cd triad
 ```
 
 The installer handles its own dependencies, using the command each project publishes:
-`uv`, opencode, Docker, Strix and (for the dashboard) Node.js. It then clones Cairn,
-applies the one patch this repo ships, and puts a `triad` wrapper in `~/.local/bin`.
+`uv`, opencode, Docker, Strix and (for the dashboard) the Rust toolchain. It then clones
+Cairn, applies the one patch this repo ships, and puts a `triad` wrapper in `~/.local/bin`.
 `./install.sh --help` lists the flags, and `--check` reports what is installed without
-changing anything. The dashboard and its Node runtime install by default; `--no-tui`
-skips both. Hermes is only installed if you ask for it with `--with-hermes`.
-It also adds the Node it installs to your shell rc, so a fresh shell finds it.
+changing anything. The dashboard builds from Rust by default; `--no-tui` skips it. Hermes
+is only installed if you ask for it with `--with-hermes`.
 
 If it added you to the `docker` group, that only applies to new logins: run `newgrp docker`
 or log out and back in before going further.
@@ -41,7 +40,7 @@ or log out and back in before going further.
 ## Quick start
 
 ```bash
-./install.sh    # the CLI, Node and the dashboard
+./install.sh    # the CLI and the dashboard
 
 triad           # open the dashboard; the first run walks setup, then press n for a new scan
 triad --status  # the text summary instead, for scripts
@@ -132,10 +131,9 @@ agent message stream first, then agents and todos with status, findings, coverag
 and the tail of `strix.log`. `enter` on the CAIRN target opens the project graph and the
 Cairn logs.
 
-The installer sets up Node 18 or newer and the dashboard's dependencies by default, so
-`triad tui` works after a fresh install; `--no-tui` skips both. A dashboard install that
-fails is reported but does not stop the rest of the install, so the CLI still works
-without it.
+The installer builds the Rust dashboard from `tui-rs/` by default, so `triad tui` works
+after a fresh install; `--no-tui` skips it. A dashboard build that fails is reported but
+does not stop the rest of the install, so the CLI still works without it.
 
 ## What is in the repo
 
@@ -148,7 +146,7 @@ dispatch.yaml         worker pool, model routing, concurrency caps
 dispatch.local.yaml   no-Docker and arm64 fallback
 contracts/            the handoff schema and the rules-of-engagement template
 plugin/               the strix_* and cairn_* tools
-tui/                  the terminal dashboard (Ink); node_modules are installed, not committed
+tui-rs/               the terminal dashboard (Rust); tui/ is the retired Ink one
 mcp/cairn_mcp.py      the Cairn graph as an MCP server
 assets/               the banner and the mark
 ```
