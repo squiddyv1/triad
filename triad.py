@@ -707,8 +707,13 @@ def cmd_tui(args):
     cmd = [node, "--import", "tsx/esm", str(tui / "src" / "index.tsx")]
     if getattr(args, "interval", None):
         cmd += ["--interval", str(args.interval)]
+    # The app shells out to this CLI for its state, so it has to be told where it is:
+    # its cwd is the tui directory, where no triad.py exists.
+    env = dict(os.environ)
+    env["TRIAD_PY"] = str(_repo_root() / "triad.py")
+    env.setdefault("TRIAD_PYTHON", sys.executable)
     try:
-        return subprocess.call(cmd, cwd=str(tui))
+        return subprocess.call(cmd, cwd=str(tui), env=env)
     except KeyboardInterrupt:
         return 0
 
