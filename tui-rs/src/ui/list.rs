@@ -8,6 +8,7 @@ use ratatui::Frame;
 
 use crate::app::App;
 use crate::data::{self, RunProgress};
+use crate::mascot;
 use crate::theme;
 use crate::ui::fit;
 
@@ -28,7 +29,7 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &App) {
     let projects_height = (projects.len().max(1) as u16 + 2)
         .min(area.height.saturating_sub(runs_height))
         .max(3);
-    let [runs_area, projects_area, _] = Layout::vertical([
+    let [runs_area, projects_area, rest_area] = Layout::vertical([
         Constraint::Length(runs_height),
         Constraint::Length(projects_height),
         Constraint::Min(0),
@@ -37,6 +38,24 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &App) {
 
     draw_runs(frame, runs_area, app, runs);
     draw_projects(frame, projects_area, app, projects);
+    draw_mascot(frame, rest_area, app);
+}
+
+/// The mascot lives in the rows the two lists leave over, so it never moves the footer or
+/// reflows a pane when it appears or disappears. An area too short for the full figure draws
+/// nothing, matching the Ink `MIN_ROWS` clip.
+fn draw_mascot(frame: &mut Frame, area: Rect, app: &App) {
+    let lines = mascot::render(
+        area.height as usize,
+        app.animating(),
+        app.paused(),
+        app.mascot_frame(),
+        mascot::now_millis(),
+    );
+    if lines.is_empty() {
+        return;
+    }
+    frame.render_widget(Paragraph::new(lines), area);
 }
 
 /// `c` collapses both lists to a header plus count. The RUNS header keeps the selected run
@@ -64,7 +83,7 @@ fn draw_collapsed(frame: &mut Frame, area: Rect, app: &App) {
             format!(" PROJECTS ({}) ", projects.len()),
             theme::bold().fg(Color::White),
         ));
-    let [runs_area, projects_area, _] = Layout::vertical([
+    let [runs_area, projects_area, rest_area] = Layout::vertical([
         Constraint::Length(2),
         Constraint::Length(2),
         Constraint::Min(0),
@@ -72,6 +91,7 @@ fn draw_collapsed(frame: &mut Frame, area: Rect, app: &App) {
     .areas(area);
     frame.render_widget(runs_block, runs_area);
     frame.render_widget(projects_block, projects_area);
+    draw_mascot(frame, rest_area, app);
 }
 
 fn draw_runs(frame: &mut Frame, area: Rect, app: &App, runs: &[RunProgress]) {

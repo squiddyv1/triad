@@ -6,6 +6,7 @@ mod app;
 mod data;
 mod form;
 mod graph;
+mod mascot;
 mod signals;
 mod strix;
 mod theme;
@@ -29,11 +30,43 @@ use crate::app::App;
 type Tui = Terminal<CrosstermBackend<Stdout>>;
 
 fn main() -> io::Result<()> {
+    // A headless review path: print the mascot art and exit, before any terminal is touched.
+    if std::env::args().any(|arg| arg == "--print-mascot") {
+        print_mascot();
+        return Ok(());
+    }
     let interval = parse_interval();
     let mut terminal = setup_terminal()?;
     let result = run(&mut terminal, interval);
     restore_terminal(&mut terminal)?;
     result
+}
+
+/// Print each lab's figure as text, at three animation frames and the resting pose, so the art
+/// can be reviewed without a terminal. Frames match the Ink review harness.
+fn print_mascot() {
+    for (index, lab) in mascot::LABS.iter().enumerate() {
+        let now = index as i64 * 180_000 + 1_000;
+        let hex = match lab.color {
+            ratatui::style::Color::Rgb(r, g, b) => format!("#{r:02x}{g:02x}{b:02x}"),
+            other => format!("{other:?}"),
+        };
+        println!("\n=== lab {index} (colour {hex}) ===");
+        for frame in [0u64, 3, 8] {
+            let pose = mascot::mascot_state(true, false, frame, now);
+            println!("  -- animating, frame {frame} --");
+            for line in &pose.art {
+                println!("   |{}", mascot::resolve_line(line));
+            }
+            println!("   word: {}", pose.word);
+        }
+        let rest = mascot::mascot_state(false, false, 0, now);
+        println!("  -- resting (nothing live) --");
+        for line in &rest.art {
+            println!("   |{}", mascot::resolve_line(line));
+        }
+        println!("   word: {}   sleeping: {}", rest.word, rest.sleeping);
+    }
 }
 
 fn run(terminal: &mut Tui, interval: Duration) -> io::Result<()> {

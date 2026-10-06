@@ -334,6 +334,18 @@ impl App {
         self.runs().iter().any(RunProgress::is_animating)
     }
 
+    /// A live run that is not scanning: the mascot's paused pose, the Ink `paused` flag.
+    /// `animating` already covers the other half, so this is only true when nothing moves.
+    pub fn paused(&self) -> bool {
+        !self.animating() && self.runs().iter().any(|run| run.live || run.paused)
+    }
+
+    /// The shared ticker frame the mascot draws from. It advances only while animating, so an
+    /// idle or paused column is still without a second timer.
+    pub fn mascot_frame(&self) -> u64 {
+        self.spinner
+    }
+
     pub fn spinner_frame(&self) -> &'static str {
         let frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
         let index = (self.spinner % frames.len() as u64) as usize;
