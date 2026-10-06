@@ -1,8 +1,8 @@
-# Triad: architecture and implementation plan
+# Triad: design notes
 
-Deep-research notes for building one deployable system out of **Strix** (discovery)
-and **Cairn** (exploitation), with **Hermes** available as an optional orchestration
-layer on top, following the reference architecture in the Gambit campaign write-up.
+Research, design and the verified API behaviour behind **Triad**: one deployable system
+out of **Strix** (discovery) and **Cairn** (exploitation), with **Hermes** available as an
+optional orchestration layer on top.
 
 **Dependency shape.** The normal flow is `triad.py` driving Strix, feeding the Cairn
 graph, then reporting. That path imports the `plugin/` package directly and never
@@ -29,7 +29,6 @@ keeping, and which the design leans on:
 | Hermes: orchestration. Persistent memory, self-editing skills (121 total, 78 attack), scheduled jobs, web console; 1,951 human prompts over 260 sessions | The control plane is where governance, budget and audit live, not the prompt |
 | Model routing: Strix on GLM-5.2 → DeepSeek V4 Pro; Cairn on DeepSeek V4.1 Flash; Hermes on Claude Opus 4.6 | Cheap models on high-volume loops, strong models on decision points |
 | ~$25.46 mean per completed scan; $12k–$18k total; $3.13–$79.31 range | Cost accounting per **workflow**, not per token |
-| Correction to the popular retelling: 27 companies compromised in the 10–15 Sep burst; 600k+ card records came from **two** companies, not 27; skimmer counts are inconsistent across the report body and summary (19 vs 5 vs 119) | Do not repeat inflated numbers; report what the evidence supports |
 
 **The architectural lesson**, which is the one we're implementing: *discovery
 produces structured opportunities, execution is bounded and stateful, orchestration
@@ -230,37 +229,71 @@ host you control, on a network you control, inside an authorized engagement.
 | Prompt-cache / cost surprises | bill outruns value | log cost per completed objective, not per token; stop on a threshold |
 | Engagement data leaking across clients | one target's creds used on another | one Cairn project per target, one workspace per engagement, scoped proxy rules |
 
+### 4.4 Installing it: methods and paths
+
+`install.sh` uses each project's published installer by default
+(`TRIAD_INSTALL_METHOD=official`). `pkg` means `uv tool install strix-agent` /
+`hermes-agent`, falling back to the vendor script; `none` detects only, and never
+installs. `STRIX_INSTALL_METHOD` and `HERMES_INSTALL_METHOD` override it per layer.
+Prefer `official`: PyPI lags the vendor channel (0.19.0 against the 0.21.x the official
+script tracks).
+
+Every path is overridable, so nothing is machine-specific: `TRIAD_HOME` (the script's own
+directory), `CAIRN_DIR` (`$TRIAD_HOME/cairn`), `HERMES_HOME` (`~/.hermes`), `BIN_DIR`
+(`~/.local/bin`), `ENGAGEMENTS` (`~/engagements`), plus `UV_INSTALL_METHOD` and
+`DOCKER_INSTALL_METHOD` to downgrade either to a report.
+
+Docker and uv are installed when missing, since Cairn needs both. That needed care on
+derivatives: Kali, Parrot, Mint and Pop are not distros Docker publishes packages for, so
+`get.docker.com` takes its `*)` branch, maps the distro to `debian` while keeping
+`VERSION_ID`, and writes a source for a suite that does not exist
+(`deb .../debian kali-rolling stable`). The script fails and every later `apt` call fails
+with it. So the installer gates the vendor script on the distro id, falls back to the
+distro's own `docker.io` (what Kali documents), and removes a stale derivative-suite
+`docker.list` so apt recovers.
+
+The optional Hermes layer is the reason it is opt-in: its installer unpacks Python, Node,
+npm, ripgrep and FFmpeg and clones the agent, landing near 7 GB, so `install.sh` checks
+for 4 GB free and refuses early with a reason rather than dying halfway.
+
+### 4.5 The opencode worker backend
+
+Upstream Cairn ships four worker backends (claudecode, codex, pi, mock). With none of
+those CLIs installed the exploitation layer cannot run at all, and opencode was already
+on this machine, so this repo adds a fifth. It ships as
+`patches/0001-opencode-worker-backend.patch` rather than a vendored Cairn, and registers
+itself in `workers/adapters/__init__.py`, `workers/registry.py` and the `WorkerType` /
+`WORKER_ENV_KEYS` maps in `dispatcher/config.py`. It parses opencode's `--format json`
+event stream for the reply text and session id, so the conclude phase continues the same
+session.
+
+Its env keys are `OPENCODE_MODEL`, `OPENCODE_AGENT` and `OPENCODE_AUTO`, plus
+`OPENCODE_BASE_URL` / `OPENCODE_API_KEY` / `OPENCODE_EXTRA_HEADERS` for the health check.
+In local mode no keys are injected; it reuses the host config. Verified against a live
+target, including the `{"accepted": true, "data": {...}}` reply contract, bash tool use
+and cost telemetry. 9 new tests; all 107 pass.
+
+That backend never needs `opencode auth login`: the key is written straight into
+`~/.local/share/opencode/auth.json` (mode 600) and merged rather than replaced, and
+`triad auth` rewrites it from `.env`.
+
+### 4.6 Not built yet
+
+The controls the design asks for but this repo does not implement: an egress proxy with
+an allowlist generated from the scope file, a denylist of destructive actions enforced in
+the plugin's `post_tool_call` hook, a signed audit export, and per-client memory
+namespaces. Approval granularity is still undecided, because per-action kills throughput
+and per-project is too coarse; the intended middle is per-`risk_level`, where read-only
+runs go free, state changes notify and destructive actions block. Two other decisions
+remain open: where the graph lives long term (Cairn's SQLite is per-engagement and Hermes
+memory is per-profile), and whether Cairn's `container/AGENTS.md` needs a fork, since it
+is CTF-shaped (Kali container, OOB callbacks, tmux shells) and client work wants a
+reviewed, client-shaped prompt group. Past the controls, multi-target fan-out and a
+findings sink (SARIF into a GRC tool or Jira) are also unbuilt.
+
 ---
 
-## 5. Phased build plan
-
-**Phase 0: stand it up (half a day).** Clone Cairn, `make bootstrap`, `make up`.
-Verify `curl :8000/projects`, then run `triad.py status`. Everything in this repo is
-built to make phase 0 the whole setup. Add `--with-hermes` and `make plugin` only if
-you want the optional control plane.
-
-**Phase 1: one target, tool-call driven (a day).** Pick a deliberately vulnerable
-target you own (DVWA/Juice Shop). Run the loop by hand from a Hermes session:
-create → scan → read → feed → watch → validate. The goal is to learn where the
-handoff is lossy. Do **not** automate yet.
-
-**Phase 2: close the loop (2–3 days).** Wrap the loop in a Hermes cron job
-(`integrations/hermes/config-snippets.yaml`) that iterates engagements, re-scans stale targets,
-and posts a digest. Add the approval gate in the gateway and the cost ledger.
-
-**Phase 3: harden (ongoing).** Egress proxy with a generated allowlist from the
-scope file; a denylist of destructive actions enforced in the plugin's
-`post_tool_call` hook; signed audit export (Cairn `timeline` + the plugin hook log);
-per-client memory namespaces so one engagement's facts never bleed into another's.
-
-**Phase 4: scale and productize.** Multi-target fan-out, a findings sink (SARIF →
-your GRC/Jira), and a report renderer that walks `cairn_graph(format="path")` into
-the narrative. This is a genuinely nice property: the attack path *is* the
-deliverable, already ordered and already evidenced.
-
----
-
-## 6. Licensing and legal posture
+## 5. Licensing and legal posture
 
 - **Cairn is AGPL-3.0** for personal/educational use; commercial use requires a
   commercial license from the author. If this ends up inside a paid engagement
@@ -271,23 +304,7 @@ deliverable, already ordered and already evidenced.
 
 ---
 
-## 7. Open questions to settle before Phase 2
-
-1. **Who owns the graph long-term?** Cairn's SQLite is per-engagement; Hermes memory
-   is per-profile. Decide the split so findings survive both.
-2. **Does Cairn's worker prompt set need forking?** Its `container/AGENTS.md` is CTF-shaped
-   (Kali container, OOB callbacks, tmux shells). For client work you want a
-   client-shaped prompt group, reviewed in git. This is also the control that makes
-   lesson #1 from the campaign impossible here.
-3. **Approval granularity.** Per-action approval kills throughput; per-project approval
-   is too coarse. The middle ground is per-`risk_level`: read-only runs free, state
-   changes notify, destructive blocks.
-4. **Cost ceiling semantics.** Per engagement? Per day? Pick one and encode it, or the
-   first runaway week sets the policy for you.
-
----
-
-## 8. Dry run: what actually happened
+## 6. Dry run: what actually happened
 
 Target: `https://pentest-ground.com:4280`, a public intentionally-vulnerable practice
 host (DVWA). Full run, from engagement to report.
