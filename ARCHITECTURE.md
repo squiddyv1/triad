@@ -335,6 +335,11 @@ the dashboard. `enter` on the STRIX pane opens a verbose view of the selected ru
 first, then agents and todos with status, findings, coverage, usage and cost, and the
 `strix.log` tail last, refetched on the same interval.
 
+`enter` on the CAIRN target opens the project graph and the Cairn logs. The graph comes from
+`triad graph --json` (nodes by hop, intents as edges, the open frontier pulsing on Ink's
+shared animation frame) and the logs from `triad cairn-logs --json`, both refetched only
+while the modal is open.
+
 `install.sh` installs Node 18 or newer from the official prebuilt tarball (no root, no
 distro package) and the app's dependencies by default, so `triad tui` works after a fresh
 install; `--no-tui` skips both, and `NODE_INSTALL_METHOD` / `TUI_INSTALL_METHOD` downgrade

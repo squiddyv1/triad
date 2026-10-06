@@ -4,12 +4,15 @@
 // `triad runs --json`; the numbers on the right come from Docker and /proc. The verbose
 // view and the new-engagement form are the two modal states over that list.
 import React, {useCallback, useEffect, useMemo, useRef, useState} from 'react';
-import {Box, Text, render, useApp, useInput} from 'ink';
+import {Box, Text, render, useAnimation, useApp, useBoxMetrics, useInput} from 'ink';
+import type {DOMElement, Key} from 'ink';
 import {existsSync, readFileSync} from 'node:fs';
 import {join} from 'node:path';
 import {
-  cpuPercent, elapsed, fetchContainerMetrics, fetchProgressDetail, fetchSnapshot, human, humanKb,
-  readProc, type ProcSample, type ProgressDetail, type RunProgress, type Snapshot,
+  cpuPercent, elapsed, fetchCairnLogs, fetchContainerMetrics, fetchGraph, fetchProgressDetail,
+  fetchSnapshot, human, humanKb, readProc,
+  type CairnLogs, type GraphEdge, type GraphNode, type ProcSample, type ProgressDetail,
+  type ProjectGraph, type RunProgress, type Snapshot,
 } from './data.js';
 import {
   feed, pauseOrResume, remove, stackDown, stackUp, startEngage, startScan, stop,
@@ -20,7 +23,7 @@ import {Mascot} from './mascot.js';
 const HELP = [
   ['↑/↓  k/j', 'select a run'],
   ['tab', 'switch the target between the run and its graph'],
-  ['enter', 'verbose agent stream for the selected run'],
+  ['enter', 'stream on the STRIX target, project graph on the CAIRN target'],
   ['n', 'new engagement (scan or engage form)'],
   ['p', 'pause / resume the target'],
   ['s', 'stop the target'],
@@ -740,6 +743,171 @@ function buildStream(d: ProgressDetail, width: number): Line[] {
   return lines;
 }
 
+// The Cairn modal's top pane: an ASCII node-link diagram of the project graph, laid
+// out one column per hop. The layout is built once per graph (useMemo in App) and only
+// the animated frontier markers are recomputed per frame.
+const KIND_COLOUR: Record<string, string> = {
+  origin: 'white', goal: 'green', fact: 'cyan', hint: 'magenta',
+};
+const KIND_RANK: Record<string, number> = {origin: 0, fact: 1, hint: 2, goal: 3};
+const EDGE_COLOUR: Record<string, string | undefined> = {
+  concluded: 'green', working: 'yellow', unclaimed: undefined,
+};
+
+type EdgeCell = {
+  status: GraphEdge['status'];
+  from: string;
+  to: string | null;
+  id: string;
+};
+
+// One column per hop, origin first and the goal last. Nodes stack inside a column and
+// the intents are drawn in the gutter between two columns; the goal sits with the fact
+// it is completed from, so it can share the last column. The grid is built once per
+// graph (useMemo in App); only the frontier markers are recomputed per frame.
+type GraphLayout = {
+  nodeWidth: number;
+  gutterWidths: number[];
+  columns: Line[][];
+  bands: EdgeCell[][];
+  height: number;
+};
+
+const EDGE_TRACK = 4;
+const EDGE_FRONTIER = '⋯';
+
+// Truncate without padding: a node cell is padded, but an edge's target is not.
+function clipText(text: string, width: number): string {
+  return text.length > width ? `${text.slice(0, Math.max(0, width - 1))}…` : text;
+}
+
+function padSpans(spans: Line, width: number): Line {
+  const out: Line = [];
+  let used = 0;
+  for (const span of spans) {
+    if (used >= width) break;
+    const room = width - used;
+    if (span.text.length <= room) {
+      out.push({...span});
+      used += span.text.length;
+    } else {
+      out.push({...span, text: span.text.slice(0, room)});
+      used = width;
+    }
+  }
+  if (used < width) out.push({text: ' '.repeat(width - used)});
+  return out;
+}
+
+// The visible width of an edge cell: from, a 4-char track, the intent id, and the target.
+function edgeWidth(cell: EdgeCell): number {
+  const target = cell.to ? cell.to.length : EDGE_FRONTIER.length;
+  return cell.from.length + 1 + EDGE_TRACK + 1 + cell.id.length + 3 + target;
+}
+
+function buildGraphLayout(graph: ProjectGraph, width: number): GraphLayout {
+  const maxHop = Math.max(0, ...graph.nodes.map(n => n.hop));
+  const byHop: GraphNode[][] = Array.from({length: maxHop + 1}, () => []);
+  for (const node of graph.nodes) byHop[node.hop]?.push(node);
+  for (const column of byHop) {
+    column.sort((a, b) => (KIND_RANK[a.kind] ?? 9) - (KIND_RANK[b.kind] ?? 9)
+      || a.id.localeCompare(b.id));
+  }
+
+  const numCols = byHop.length;
+  const numBands = Math.max(0, numCols - 1);
+  const hopOf = new Map(graph.nodes.map(n => [n.id, n.hop]));
+  const bands: EdgeCell[][] = Array.from({length: numBands}, () => []);
+  for (const edge of graph.edges) {
+    if (numBands === 0) break;
+    const sourceHop = edge.from.length ? Math.min(...edge.from.map(id => hopOf.get(id) ?? 0)) : 0;
+    const toHop = edge.to ? hopOf.get(edge.to) : undefined;
+    // The edge is drawn in the gutter just left of its target, or right of its source
+    // when it has not concluded and has no target column yet.
+    const band = Math.max(0, Math.min(numBands - 1, toHop === undefined ? sourceHop : toHop - 1));
+    bands[band].push({status: edge.status, from: edge.from.join('+') || '?',
+                      to: edge.to, id: edge.id});
+  }
+  for (const band of bands) band.sort((a, b) => a.id.localeCompare(b.id));
+
+  const gutterWidths = bands.map(cells => {
+    if (!cells.length) return 6;
+    return Math.min(28, Math.max(...cells.map(edgeWidth)));
+  });
+  const gutterTotal = gutterWidths.reduce((sum, w) => sum + w, 0);
+  const nodeWidth = Math.max(8, Math.min(30, Math.floor(
+    (Math.max(24, width) - gutterTotal - numCols - numBands) / Math.max(1, numCols))));
+
+  const columns = byHop.map((nodes, hop) => {
+    const head: Line = [{text: fit(`hop ${hop}`, nodeWidth), dim: true, bold: true}];
+    return [head, ...nodes.map(node => [
+      {text: `${node.id} `, color: KIND_COLOUR[node.kind] ?? 'gray',
+       bold: node.kind === 'origin' || node.kind === 'goal'},
+      {text: clipText(node.label, Math.max(0, nodeWidth - node.id.length - 1)),
+       color: KIND_COLOUR[node.kind] ?? 'gray'},
+    ] as Line)];
+  });
+
+  const height = Math.max(1, ...columns.map(c => c.length), ...bands.map(b => b.length + 1));
+  return {nodeWidth, gutterWidths, columns, bands, height};
+}
+
+function edgeLine(cell: EdgeCell, frame: number, pulse: boolean): Line {
+  const colour = EDGE_COLOUR[cell.status];
+  const dim = cell.status === 'unclaimed';
+  const spans: Line = [{text: `${cell.from} `, dim}];
+  const base = cell.status === 'concluded' ? '─' : '·';
+  const pos = cell.status === 'concluded' ? EDGE_TRACK - 1 : (pulse ? frame % EDGE_TRACK : 0);
+  for (let i = 0; i < EDGE_TRACK; i++) {
+    if (i === pos) spans.push({text: '▶', color: colour, bold: cell.status === 'working'});
+    else spans.push({text: base, color: cell.status === 'working' ? colour : undefined, dim});
+  }
+  spans.push({text: ` ${cell.id}`, color: colour, dim});
+  spans.push({text: cell.to ? ` → ${cell.to}` : ` → ${EDGE_FRONTIER}`, color: colour, dim});
+  return spans;
+}
+
+function renderGraphLayout(layout: GraphLayout, frame: number, pulse: boolean): Line[] {
+  const lines: Line[] = [];
+  for (let row = 0; row < layout.height; row++) {
+    const spans: Line = [];
+    for (let k = 0; k < layout.columns.length; k++) {
+      spans.push(...padSpans(layout.columns[k][row] ?? [], layout.nodeWidth), {text: ' '});
+      if (k < layout.gutterWidths.length) {
+        const cell = layout.bands[k]?.[row - 1];
+        spans.push(...padSpans(cell ? edgeLine(cell, frame, pulse) : [],
+                              layout.gutterWidths[k]), {text: ' '});
+      }
+    }
+    lines.push(spans);
+  }
+  return lines;
+}
+
+function logLine(text: string): Span[] {
+  const upper = text.toUpperCase();
+  if (/ERROR|TRACEBACK|EXCEPTION|CRITICAL/.test(upper)) return [{text, color: 'red'}];
+  if (/WARN/.test(upper)) return [{text, color: 'yellow'}];
+  if (/\bINFO\b|\bDEBUG\b/.test(upper)) return [{text, dim: true}];
+  return [{text}];
+}
+
+function buildCairnLogLines(logs: CairnLogs | null, width: number): Line[] {
+  const lines: Line[] = [];
+  const push = (spans: Span[]) => { for (const line of wrapSpans(spans, width)) lines.push(line); };
+  if (!logs || logs.source === 'none') {
+    push([{text: '  no Cairn log source: no dispatcher, server or container is running', dim: true}]);
+    return lines;
+  }
+  if (!logs.lines.length) {
+    push([{text: '  (no log lines yet)', dim: true}]);
+    return lines;
+  }
+  for (const raw of logs.lines) push(logLine(` ${raw.replace(/\t/g, '  ')}`));
+  return lines;
+}
+
+
 function App({interval}: {interval: number}) {
   const {exit} = useApp();
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
@@ -760,7 +928,7 @@ function App({interval}: {interval: number}) {
   // not count as a sample.
   const [pollSeq, setPollSeq] = useState(-1);
 
-  const [mode, setMode] = useState<'list' | 'form' | 'verbose'>('list');
+  const [mode, setMode] = useState<'list' | 'form' | 'verbose' | 'cairn'>('list');
   const [form, setForm] = useState<NewEngagement>(BLANK_FORM);
   const [formRow, setFormRow] = useState(0);
   const [formError, setFormError] = useState<string | null>(null);
@@ -773,8 +941,24 @@ function App({interval}: {interval: number}) {
   const [detailFollow, setDetailFollow] = useState(true);
   const [detailPane, setDetailPane] = useState<'findings' | 'stream'>('stream');
   const [findingsOffset, setFindingsOffset] = useState(0);
-  const [frame, setFrame] = useState(0);
   const scrollReset = useRef(true);
+
+  // The Cairn modal: the project graph over the Cairn logs, both refetched only
+  // while it is open.
+  const [graph, setGraph] = useState<ProjectGraph | null>(null);
+  const [graphError, setGraphError] = useState<string | null>(null);
+  const [cairnLogs, setCairnLogs] = useState<CairnLogs | null>(null);
+  const [cairnPane, setCairnPane] = useState<'graph' | 'logs'>('graph');
+  const [graphOffset, setGraphOffset] = useState(0);
+  const [logOffset, setLogOffset] = useState(0);
+  const [logFollow, setLogFollow] = useState(true);
+  const [logNew, setLogNew] = useState(0);
+  const graphScrollReset = useRef(true);
+  const logScrollReset = useRef(true);
+  const logPrevLen = useRef(0);
+  const logPrevMax = useRef(0);
+  const logPrevLast = useRef('');
+  const cairnRef = useRef<DOMElement | null>(null);
 
   const refresh = useCallback(async () => {
     if (busy.current) return;
@@ -841,13 +1025,8 @@ function App({interval}: {interval: number}) {
   // and ticking it would read as work that is not happening.
   const animatingCount = runs.filter(r => r.live && !r.paused).length;
 
-  // The ticker only exists while something is animating: nothing animating means no
-  // timer, no re-renders, and a dashboard that costs nothing when idle.
-  useEffect(() => {
-    if (animatingCount === 0) return undefined;
-    const timer = setInterval(() => setFrame(f => f + 1), 120);
-    return () => clearInterval(timer);
-  }, [animatingCount]);
+  // Ink's shared timer drives the spinner, so nothing ticks when nothing is live.
+  const {frame} = useAnimation({interval: 120, isActive: animatingCount > 0});
 
   const activeRun = runs.find(r => r.live || r.paused) ?? null;
 
@@ -868,6 +1047,41 @@ function App({interval}: {interval: number}) {
   })();
 
   const target: Target = {workdir: run?.workdir, run: run?.run, project: run?.project ?? undefined};
+
+  // Both panes of the Cairn modal come from the CLI. The logs are refetched even when
+  // there is no project, because they are useful on their own; the graph reports why it
+  // is absent. Refetching stops the moment the modal closes.
+  const loadCairn = useCallback(async () => {
+    const linked = run?.project ?? null;
+    const [graphResult, logsResult] = await Promise.allSettled([
+      linked ? fetchGraph(linked) : Promise.reject(new Error('no project linked to this run')),
+      fetchCairnLogs(200),
+    ]);
+    if (graphResult.status === 'fulfilled') {
+      setGraph(graphResult.value);
+      setGraphError(null);
+    } else {
+      setGraph(null);
+      setGraphError(graphResult.reason instanceof Error ? graphResult.reason.message
+                                                       : String(graphResult.reason));
+    }
+    setCairnLogs(logsResult.status === 'fulfilled' ? logsResult.value
+                                                   : {source: 'none', lines: []});
+  }, [run?.project]);
+
+  useEffect(() => {
+    if (mode !== 'cairn') return undefined;
+    void loadCairn();
+    const timer = setInterval(() => void loadCairn(), Math.max(1, interval) * 1000);
+    return () => clearInterval(timer);
+  }, [mode, loadCairn, interval]);
+
+  // The frontier pulses only for an active project with open work; a completed or
+  // stopped project, or a closed modal, has no reason to repaint.
+  const pulseActive = mode === 'cairn' && graph?.project.status === 'active'
+    && graph.counts.open > 0;
+  const {frame: pulseFrame} = useAnimation({interval: 150, isActive: pulseActive});
+  const cairnMetrics = useBoxMetrics(cairnRef);
 
   const rows = process.stdout.rows ?? 40;
   const cols = process.stdout.columns ?? 132;
@@ -997,6 +1211,22 @@ function App({interval}: {interval: number}) {
     void loadDetail(r.workdir, r.run);
   }, [loadDetail]);
 
+  // `enter` on the CAIRN target opens the graph and the logs. State is reset here so a
+  // reopen starts at the top of a fresh fetch rather than the old scroll position.
+  const openCairn = useCallback(() => {
+    setMode('cairn');
+    setGraph(null);
+    setGraphError(null);
+    setCairnLogs(null);
+    setGraphOffset(0);
+    setLogOffset(0);
+    setLogFollow(true);
+    setLogNew(0);
+    setCairnPane('graph');
+    graphScrollReset.current = true;
+    logScrollReset.current = true;
+  }, []);
+
   const submitForm = useCallback(async () => {
     const fields = form;
     const missing: string[] = [];
@@ -1023,110 +1253,230 @@ function App({interval}: {interval: number}) {
     void refresh();
   }, [form, refresh]);
 
+  // The Cairn modal's geometry and content. The graph keeps the majority of the body;
+  // its layout is memoised on the graph, so a frame only rewrites the frontier glyphs.
+  const cairnRows = Math.max(8, viewHeight - 1);
+  const cairnPaneWidth = Math.max(24, cols - 4);
+  const graphRows = Math.max(6, Math.floor(cairnRows * 0.62));
+  const logRows = cairnRows - graphRows;
+  const graphHeight = Math.max(1, graphRows - 2);
+  const logHeight = Math.max(1, logRows - 2);
+  const cairnInner = Math.max(20, cairnPaneWidth - 2);
+  const graphInner = Math.min(cairnInner,
+    cairnMetrics.hasMeasured ? Math.max(20, cairnMetrics.width) : cairnInner);
+  const graphLayout = useMemo(
+    () => (graph ? buildGraphLayout(graph, graphInner) : null),
+    [graph, graphInner],
+  );
+  const graphMessage = !run?.project
+    ? 'no project linked to this run: press f to feed it, or start one with triad engage'
+    : graphError ? `Cairn is not answering: ${graphError}` : null;
+  const graphLines = useMemo(() => {
+    if (graphMessage) {
+      return wrapSpans([{text: ` ${graphMessage}`, color: run?.project ? 'red' : 'gray'}], cairnInner);
+    }
+    if (!graphLayout) return wrapSpans([{text: '  loading…', dim: true}], cairnInner);
+    return renderGraphLayout(graphLayout, pulseFrame, pulseActive)
+      .flatMap(line => wrapSpans(line, graphInner));
+  }, [graphMessage, graphLayout, pulseFrame, pulseActive, cairnInner, graphInner, run?.project]);
+  const logLines = useMemo(() => buildCairnLogLines(cairnLogs, cairnInner), [cairnLogs, cairnInner]);
+  const graphMax = Math.max(0, graphLines.length - graphHeight);
+  const clampedGraphOffset = Math.min(graphOffset, graphMax);
+  const logMax = Math.max(0, logLines.length - logHeight);
+  const clampedLogOffset = Math.min(logOffset, logMax);
+  const graphMark = overflowMark(clampedGraphOffset, graphLines.length, graphHeight);
+  const logMark = overflowMark(clampedLogOffset, logLines.length, logHeight);
+  const graphWindow = graphLines.slice(clampedGraphOffset, clampedGraphOffset + graphHeight);
+  const logWindow = logLines.slice(clampedLogOffset, clampedLogOffset + logHeight);
+  const graphTitle = graph
+    ? `GRAPH (${graph.counts.facts} facts · ${graph.counts.intents} intents)`
+    : graphMessage ? 'GRAPH (unavailable)' : 'GRAPH';
+
+  // The log tail follows like the stream pane, with the same paused counter. A fixed
+  // 200-line window keeps its length when lines are appended, so a changed last line is
+  // the signal that something new arrived.
+  useEffect(() => {
+    if (mode !== 'cairn' || !cairnLogs) return;
+    const len = cairnLogs.lines.length;
+    const newMax = Math.max(0, len - logHeight);
+    const last = len ? cairnLogs.lines[len - 1] : '';
+    if (logScrollReset.current) {
+      logScrollReset.current = false;
+      logPrevLen.current = len;
+      logPrevMax.current = newMax;
+      logPrevLast.current = last;
+      setLogOffset(newMax);
+      setLogFollow(true);
+      setLogNew(0);
+      return;
+    }
+    const added = len - logPrevLen.current;
+    const prevLast = logPrevLast.current;
+    const wasAtBottom = logOffset >= logPrevMax.current;
+    logPrevLen.current = len;
+    logPrevMax.current = newMax;
+    logPrevLast.current = last;
+    if (logFollow && wasAtBottom) {
+      setLogOffset(newMax);
+      setLogNew(0);
+      return;
+    }
+    if (logFollow) setLogFollow(false);
+    if (added > 0 || (len > 0 && last !== prevLast)) setLogNew(n => n + (added > 0 ? added : 1));
+    const target = Math.max(0, Math.min(newMax, logOffset + Math.min(0, added)));
+    if (target !== logOffset) setLogOffset(target);
+  }, [mode, cairnLogs, logHeight, logOffset, logFollow]);
+
+  const confirmStackDown = (input: string, key: Key): boolean => {
+    if (!pendingStackDown) return false;
+    if (input === 'y') {
+      setPendingStackDown(false);
+      void act('stopping the stack', stackDown, stackSummary);
+    } else if (input === 'n' || key.escape) {
+      setPendingStackDown(false);
+      setMessage({text: 'stop cancelled', kind: 'info'});
+    }
+    return true;
+  };
+
+  // One handler per view, each scoped with isActive, so a key is handled once and only by
+  // the view that owns it.
   useInput((input, key) => {
-    // A modal view owns every key while it is open: `q` must not quit and `d` must not
-    // delete from inside the form.
-    if (mode === 'form') {
-      const last = 4;
-      if (key.upArrow) return setFormRow(r => Math.max(0, r - 1));
-      if (key.downArrow) return setFormRow(r => Math.min(last, r + 1));
-      if (key.tab) return setFormRow(r => (r + 1) % (last + 1));
-      if (key.escape) { setMode('list'); setFormError(null); return; }
-      if (key.return) return void submitForm();
-      if (formRow === 0) {
-        if (key.leftArrow || key.rightArrow || input === ' ') {
-          setForm(f => ({...f, flow: f.flow === 'scan' ? 'engage' : 'scan'}));
-        }
-        return;
-      }
-      if (formRow === 4) {
-        const order: ScanMode[] = ['quick', 'standard', 'deep'];
-        if (key.rightArrow || input === ' ') {
-          setForm(f => ({...f, mode: order[(order.indexOf(f.mode) + 1) % order.length]}));
-        } else if (key.leftArrow) {
-          setForm(f => ({...f, mode: order[(order.indexOf(f.mode) + order.length - 1) % order.length]}));
-        }
-        return;
-      }
-      const edit = (change: (value: string) => string) => setForm(f => {
-        if (formRow === 1) return {...f, target: change(f.target)};
-        if (formRow === 2) return {...f, title: change(f.title)};
-        return {...f, goal: change(f.goal)};
-      });
-      if (key.backspace || key.delete) return edit(v => v.slice(0, -1));
-      // Accept a whole pasted run of printable characters, not just one keystroke.
-      if (input && !/[\x00-\x1f\x7f]/.test(input)) return edit(v => v + input);
-      return;
-    }
-
-    // The stack confirmation owns the keys in both the list and the detail view, so
-    // `down` cannot be half-answered.
-    if (pendingStackDown) {
-      if (input === 'y') {
-        setPendingStackDown(false);
-        void act('stopping the stack', stackDown, stackSummary);
-      } else if (input === 'n' || key.escape) {
-        setPendingStackDown(false);
-        setMessage({text: 'stop cancelled', kind: 'info'});
+    const last = 4;
+    if (key.upArrow) return setFormRow(r => Math.max(0, r - 1));
+    if (key.downArrow) return setFormRow(r => Math.min(last, r + 1));
+    if (key.tab) return setFormRow(r => (r + 1) % (last + 1));
+    if (key.escape) { setMode('list'); setFormError(null); return; }
+    if (key.return) return void submitForm();
+    if (formRow === 0) {
+      if (key.leftArrow || key.rightArrow || input === ' ') {
+        setForm(f => ({...f, flow: f.flow === 'scan' ? 'engage' : 'scan'}));
       }
       return;
     }
+    if (formRow === 4) {
+      const order: ScanMode[] = ['quick', 'standard', 'deep'];
+      if (key.rightArrow || input === ' ') {
+        setForm(f => ({...f, mode: order[(order.indexOf(f.mode) + 1) % order.length]}));
+      } else if (key.leftArrow) {
+        setForm(f => ({...f, mode: order[(order.indexOf(f.mode) + order.length - 1) % order.length]}));
+      }
+      return;
+    }
+    const edit = (change: (value: string) => string) => setForm(f => {
+      if (formRow === 1) return {...f, target: change(f.target)};
+      if (formRow === 2) return {...f, title: change(f.title)};
+      return {...f, goal: change(f.goal)};
+    });
+    if (key.backspace || key.delete) return edit(v => v.slice(0, -1));
+    // Accept a whole pasted run of printable characters, not just one keystroke.
+    if (input && !/[\x00-\x1f\x7f]/.test(input)) return edit(v => v + input);
+    return;
+  }, {isActive: mode === 'form'});
 
-    if (mode === 'verbose') {
-      if (input === 'q' || (key.ctrl && input === 'c')) return exit();
-      if (key.escape || key.return) { setMode('list'); return; }
-      // Collapse the left lists from the detail view too; it never touches the pane focus.
-      if (input === 'c') return setListsCollapsed(v => !v);
-      if (input === 'r') {
-        if (detailTarget) void loadDetail(detailTarget.workdir, detailTarget.run);
-        return;
-      }
-      if (input === 'u') return void act('starting the stack', stackUp, stackSummary);
-      if (input === 'x') return setPendingStackDown(true);
-      // tab moves between the two panes; the list view keeps its own tab meaning.
-      if (key.tab) {
-        setDetailPane(p => (p === 'findings' ? 'stream' : 'findings'));
-        return;
-      }
-      // Scrolling up pauses the stream; reaching the bottom again (or End) resumes. Home
-      // stops at the top. Findings scrolling never touches the stream's follow state.
-      const step = (delta: number) => {
-        const next = Math.min(maxOffset, Math.max(0, detailOffset + delta));
-        if (next >= maxOffset) {
-          setDetailFollow(true);
-          setDetailNew(0);
-        } else {
-          setDetailFollow(false);
-          baselineIdRef.current = topMessageId;
-        }
-        setDetailOffset(next);
-      };
-      const stepFindings = (delta: number) => {
-        setFindingsOffset(o => Math.min(findingsMax, Math.max(0, o + delta)));
-      };
-      const scrolling = detailPane === 'findings'
-        ? {step: stepFindings, page: findingsHeight}
-        : {step, page: streamHeight};
-      if (key.upArrow || input === 'k') return scrolling.step(-1);
-      if (key.downArrow || input === 'j') return scrolling.step(1);
-      if (key.pageUp) return scrolling.step(-scrolling.page);
-      if (key.pageDown) return scrolling.step(scrolling.page);
-      if (key.home || input === 'g') {
-        if (detailPane === 'findings') return setFindingsOffset(0);
-        setDetailFollow(false);
-        baselineIdRef.current = topMessageId;
-        setDetailNew(0);
-        return setDetailOffset(0);
-      }
-      if (key.end || input === 'G') {
-        if (detailPane === 'findings') return setFindingsOffset(findingsMax);
+  // The Cairn modal, mirroring the Strix modal's keys: esc/enter close, tab switches
+  // panes, arrows and PgUp/PgDn scroll the focused one, g/G jump, r refetches.
+  useInput((input, key) => {
+    if (confirmStackDown(input, key)) return;
+    if (input === 'q' || (key.ctrl && input === 'c')) return exit();
+    if (key.escape || key.return) { setMode('list'); return; }
+    if (input === 'c') return setListsCollapsed(v => !v);
+    if (input === 'r') { void loadCairn(); return; }
+    if (input === 'u') return void act('starting the stack', stackUp, stackSummary);
+    if (input === 'x') return setPendingStackDown(true);
+    if (key.tab) {
+      setCairnPane(p => (p === 'graph' ? 'logs' : 'graph'));
+      return;
+    }
+    const scrollGraph = (delta: number) =>
+      setGraphOffset(o => Math.min(graphMax, Math.max(0, o + delta)));
+    const scrollLog = (delta: number) => {
+      const next = Math.min(logMax, Math.max(0, logOffset + delta));
+      if (next >= logMax) { setLogFollow(true); setLogNew(0); }
+      else setLogFollow(false);
+      setLogOffset(next);
+    };
+    const scrolling = cairnPane === 'graph'
+      ? {step: scrollGraph, page: graphHeight}
+      : {step: scrollLog, page: logHeight};
+    if (key.upArrow || input === 'k') return scrolling.step(-1);
+    if (key.downArrow || input === 'j') return scrolling.step(1);
+    if (key.pageUp) return scrolling.step(-scrolling.page);
+    if (key.pageDown) return scrolling.step(scrolling.page);
+    if (key.home || input === 'g') {
+      if (cairnPane === 'graph') return setGraphOffset(0);
+      setLogFollow(false);
+      return setLogOffset(0);
+    }
+    if (key.end || input === 'G') {
+      if (cairnPane === 'graph') return setGraphOffset(graphMax);
+      setLogFollow(true);
+      setLogNew(0);
+      return setLogOffset(logMax);
+    }
+    return;
+  }, {isActive: mode === 'cairn'});
+
+  useInput((input, key) => {
+    // The stack confirmation owns every key in the detail view, so `down` cannot be
+    // half-answered.
+    if (confirmStackDown(input, key)) return;
+    if (input === 'q' || (key.ctrl && input === 'c')) return exit();
+    if (key.escape || key.return) { setMode('list'); return; }
+    // Collapse the left lists from the detail view too; it never touches the pane focus.
+    if (input === 'c') return setListsCollapsed(v => !v);
+    if (input === 'r') {
+      if (detailTarget) void loadDetail(detailTarget.workdir, detailTarget.run);
+      return;
+    }
+    if (input === 'u') return void act('starting the stack', stackUp, stackSummary);
+    if (input === 'x') return setPendingStackDown(true);
+    // tab moves between the two panes; the list view keeps its own tab meaning.
+    if (key.tab) {
+      setDetailPane(p => (p === 'findings' ? 'stream' : 'findings'));
+      return;
+    }
+    // Scrolling up pauses the stream; reaching the bottom again (or End) resumes. Home
+    // stops at the top. Findings scrolling never touches the stream's follow state.
+    const step = (delta: number) => {
+      const next = Math.min(maxOffset, Math.max(0, detailOffset + delta));
+      if (next >= maxOffset) {
         setDetailFollow(true);
         setDetailNew(0);
-        return setDetailOffset(maxOffset);
+      } else {
+        setDetailFollow(false);
+        baselineIdRef.current = topMessageId;
       }
-      return;
+      setDetailOffset(next);
+    };
+    const stepFindings = (delta: number) => {
+      setFindingsOffset(o => Math.min(findingsMax, Math.max(0, o + delta)));
+    };
+    const scrolling = detailPane === 'findings'
+      ? {step: stepFindings, page: findingsHeight}
+      : {step, page: streamHeight};
+    if (key.upArrow || input === 'k') return scrolling.step(-1);
+    if (key.downArrow || input === 'j') return scrolling.step(1);
+    if (key.pageUp) return scrolling.step(-scrolling.page);
+    if (key.pageDown) return scrolling.step(scrolling.page);
+    if (key.home || input === 'g') {
+      if (detailPane === 'findings') return setFindingsOffset(0);
+      setDetailFollow(false);
+      baselineIdRef.current = topMessageId;
+      setDetailNew(0);
+      return setDetailOffset(0);
     }
+    if (key.end || input === 'G') {
+      if (detailPane === 'findings') return setFindingsOffset(findingsMax);
+      setDetailFollow(true);
+      setDetailNew(0);
+      return setDetailOffset(maxOffset);
+    }
+    return;
+  }, {isActive: mode === 'verbose'});
 
+  useInput((input, key) => {
+    if (confirmStackDown(input, key)) return;
     if (pendingDelete) {
       if (input === 'y') {
         const where = focus === 'graph' ? 'project' : 'run';
@@ -1157,7 +1507,8 @@ function App({interval}: {interval: number}) {
       return void refresh();
     }
     if (key.return) {
-      if (run && focus === 'run') openDetail(run);
+      if (run && focus === 'graph') openCairn();
+      else if (run) openDetail(run);
       return;
     }
     // Stack control is independent of the selected run, so it works with no runs too.
@@ -1179,7 +1530,7 @@ function App({interval}: {interval: number}) {
       return setPendingDelete(target);
     }
     if (input === 'f') return void act('feeding', () => feed(target));
-  });
+  }, {isActive: mode === 'list'});
 
   const sandbox = Object.entries(containers).find(([name]) => name !== 'triad-cairn-server');
   const cairn = containers['triad-cairn-server'];
@@ -1223,6 +1574,7 @@ function App({interval}: {interval: number}) {
       </Box>
 
       <Box flexGrow={1} marginTop={1}>
+        {mode !== 'cairn' && (
         <Box flexDirection="column" width={46}>
           <Box flexDirection="column" flexShrink={0}>
             <Text bold>
@@ -1252,6 +1604,7 @@ function App({interval}: {interval: number}) {
             activity={activeRun?.agents.running[0] ?? null}
           />
         </Box>
+        )}
 
         <Box flexDirection="column" flexGrow={1} borderStyle="round" borderColor="gray" paddingX={1}>
           {mode === 'form' ? (
@@ -1289,6 +1642,23 @@ function App({interval}: {interval: number}) {
                 </>
               )}
             </Box>
+          ) : mode === 'cairn' ? (
+            <Box flexDirection="column" ref={cairnRef}>
+              <Pane
+                title={`${graphTitle}${graphMark ? `  ${graphMark}` : ''}`}
+                width={cairnPaneWidth}
+                contentHeight={graphHeight}
+                focused={cairnPane === 'graph'}
+                lines={graphWindow}
+              />
+              <Pane
+                title={`CAIRN LOGS (${cairnLogs?.source ?? 'loading'})${logMark ? `  ${logMark}` : ''}`}
+                width={cairnPaneWidth}
+                contentHeight={logHeight}
+                focused={cairnPane === 'logs'}
+                lines={logWindow}
+              />
+            </Box>
           ) : error ? (
             <Text color="red">{error}</Text>
           ) : (
@@ -1319,6 +1689,26 @@ function App({interval}: {interval: number}) {
                   : 'paused · ↑ scrolled'}  q quit
             </Text>
           </>
+        ) : mode === 'cairn' ? (
+          <>
+            {pendingStackDown ? (
+              <Text color="yellow">stop the stack? (y/n)</Text>
+            ) : message ? (
+              <Text color={message.kind === 'err' ? 'red' : message.kind === 'ok' ? 'green' : 'gray'}>
+                {message.kind === 'err' ? '✗ ' : message.kind === 'ok' ? '✓ ' : '  '}{message.text}
+              </Text>
+            ) : null}
+            <Text dimColor>
+              esc close  tab pane  ↑/↓ scroll  g/G top/end  u up  x down  r refetch  pane: {cairnPane}  {'  '}
+              {cairnPane === 'logs'
+                ? (logFollow
+                    ? 'follow: on (tail -f)'
+                    : logNew > 0 ? `paused · ↓ ${logNew} new` : 'paused · ↑ scrolled')
+                : clampedGraphOffset > 0
+                  ? `graph ${Math.min(clampedGraphOffset + graphHeight, graphLines.length)}/${graphLines.length}`
+                  : 'graph top'}  q quit
+            </Text>
+          </>
         ) : (
           <>
             {help && (
@@ -1342,7 +1732,7 @@ function App({interval}: {interval: number}) {
                 {message.kind === 'err' ? '✗ ' : message.kind === 'ok' ? '✓ ' : '  '}{message.text}
               </Text>
             )}
-            <Text dimColor>n new  p pause  s stop  d delete  f feed  u up  x down  c lists  enter detail  tab target: {focus}  r refresh  ? help  q quit</Text>
+            <Text dimColor>n new  p pause  s stop  d delete  f feed  u up  x down  c lists  enter stream/graph  tab target: {focus}  r refresh  ? help  q quit</Text>
           </>
         )}
       </Box>

@@ -66,6 +66,40 @@ export type Project = {
   working_intent_count?: number;
 };
 
+// `graph --json`: the layout-ready project graph the Cairn modal draws.
+export type GraphNode = {
+  id: string;
+  kind: 'origin' | 'goal' | 'fact' | 'hint';
+  label: string;
+  status: string;
+  hop: number;
+};
+
+export type GraphEdge = {
+  id: string;
+  from: string[];
+  to: string | null;
+  status: 'unclaimed' | 'working' | 'concluded';
+  worker: string | null;
+  label: string;
+};
+
+export type ProjectGraph = {
+  project: {id: string; title: string; status: string};
+  nodes: GraphNode[];
+  edges: GraphEdge[];
+  counts: {facts: number; hints: number; intents: number; open: number; concluded: number};
+  path: {fact: string; description: string; via: string | null; worker: string | null}[];
+};
+
+// `cairn-logs --json`: the tail, and where it came from.
+export type CairnLogs = {
+  source: string;
+  path?: string;
+  container?: string;
+  lines: string[];
+};
+
 export type Snapshot = {
   root: string;
   cairn: {base: string; up: boolean; projects: Project[]};
@@ -109,6 +143,16 @@ export function runCommand(cmd: string, args: string[], timeoutMs = 20000): Prom
 
 export async function fetchSnapshot(): Promise<Snapshot> {
   return JSON.parse(await runCommand(PYTHON, [TRIAD_PY, 'runs', '--json']));
+}
+
+// The Cairn modal's two panes: the project graph, and the log tail. Both go through
+// the CLI, and both are refetched only while the modal is open.
+export async function fetchGraph(project: string): Promise<ProjectGraph> {
+  return JSON.parse(await runCommand(PYTHON, [TRIAD_PY, 'graph', '--project', project, '--json']));
+}
+
+export async function fetchCairnLogs(lines = 200): Promise<CairnLogs> {
+  return JSON.parse(await runCommand(PYTHON, [TRIAD_PY, 'cairn-logs', '--json', '--lines', String(lines)]));
 }
 
 export function triadCommand(args: string[], timeoutMs = 20000): Promise<string> {

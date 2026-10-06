@@ -99,6 +99,8 @@ Strix's own dashboard for a live or finished run.
 | `triad models` | list what a provider serves |
 | `triad up` / `triad down` | start the Cairn server and the dispatcher, or take the stack down |
 | `triad status` | list projects, or read one graph with `--project` |
+| `triad graph` | one project's nodes, edges and counts (`--json` for the dashboard) |
+| `triad cairn-logs` | tail the Cairn log from the live dispatcher, server or container |
 | `triad engage` | the whole flow: project, scan, feed |
 | `triad scan` / `findings` / `feed` | those same steps on their own |
 | `triad progress` | how far along a running scan is, from its own state files |
@@ -120,13 +122,15 @@ live telemetry for the sandbox container, the scan process and the dispatcher. `
 Keys act on whichever side the footer names as the target. `tab` switches between the run
 and its graph, `p` pauses or resumes it, `s` stops it, `d` deletes it after asking, `f`
 feeds the run into its project again, `u` starts the stack (`triad up`) and `x` takes it
-down after asking. A scan whose process is gone reads `stale` rather than `running`,
+down after asking. `enter` on the CAIRN target opens the project graph and the Cairn logs.
+A scan whose process is gone reads `stale` rather than `running`,
 because run.json keeps saying running after a kill.
 
 `n` opens a new-engagement form and starts either a scan or the full engage flow from the
 dashboard. `enter` on the STRIX pane opens the selected run's verbose progress: its own
 agent message stream first, then agents and todos with status, findings, coverage, usage,
-and the tail of `strix.log`.
+and the tail of `strix.log`. `enter` on the CAIRN target opens the project graph and the
+Cairn logs.
 
 The installer sets up Node 18 or newer and the dashboard's dependencies by default, so
 `triad tui` works after a fresh install; `--no-tui` skips both. A dashboard install that

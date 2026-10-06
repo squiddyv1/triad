@@ -19,6 +19,7 @@ import argparse
 import importlib.util
 import json
 import os
+from collections import deque
 import platform
 import re
 import shutil
@@ -886,6 +887,242 @@ def cmd_status(args):
     return 0
 
 
+LABEL_MAX = 80
+
+
+def _cap_label(text, limit=LABEL_MAX):
+    """One flattened line of a description, with a marker when it had to be cut.
+
+    Node and edge labels go into a fixed-width diagram, so newlines and runs of
+    spaces are collapsed; the diagram truncates again to its own column.
+    """
+    text = " ".join((text or "").split())
+    return text if len(text) <= limit else text[:limit - 1].rstrip() + "…"
+
+
+def _fact_hops(fact_ids, intents) -> dict[str, int]:
+    """Distance in concluded intents from `origin`, as a dict id -> hop.
+
+    Only concluded edges count: an open intent has reached nothing yet. Facts the
+    walk cannot reach (no concluded chain back to origin) sit at hop 0 next to it
+    rather than being dropped, so the diagram never loses a node.
+    """
+    hop: dict[str, int | None] = {fid: None for fid in fact_ids}
+    if "origin" in hop:
+        hop["origin"] = 0
+    forward = {}
+    for intent in intents:
+        if not intent.get("to"):
+            continue
+        for source in intent.get("from") or []:
+            forward.setdefault(source, []).append(intent["to"])
+    queue = deque(["origin"]) if "origin" in hop else deque()
+    while queue:
+        here = queue.popleft()
+        base = hop.get(here) or 0
+        for nxt in forward.get(here, []):
+            if nxt in hop and hop[nxt] is None:
+                hop[nxt] = base + 1
+                queue.append(nxt)
+    return {fid: (value if value is not None else 0) for fid, value in hop.items()}
+
+
+def _graph_payload(c, graph):
+    """The layout-ready graph: nodes by hop, edges by status, counts and the path.
+
+    `to` is null on an intent that has not concluded, which is the frontier the
+    dashboard draws reaching forward. The goal carries the hop of the fact it is
+    completed from (or of the deepest fact while it is still unreached), so it sits
+    at the far end of the graph rather than adding a hop of its own.
+    """
+    project = graph.get("project", {})
+    facts = graph.get("facts") or []
+    hints = graph.get("hints") or []
+    intents = graph.get("intents") or []
+
+    discovered = [f for f in facts if f.get("id") not in ("origin", "goal")]
+    hops = _fact_hops([f["id"] for f in discovered] + (["origin"] if any(
+        f.get("id") == "origin" for f in facts) else []), intents)
+    deepest = max(hops.values()) if hops else 0
+    # The goal is one column past the deepest fact: in a completed project that is the
+    # fact it was concluded from, so the goal always lands last with its edge beside it.
+    goal_hop = deepest + 1
+
+    frontier = {src for intent in intents if not intent.get("to")
+                for src in (intent.get("from") or [])}
+
+    nodes = []
+    for fact in facts:
+        fid = fact.get("id")
+        if fid == "origin":
+            kind = "origin"
+        elif fid == "goal":
+            kind = "goal"
+        else:
+            kind = "fact"
+        if kind == "goal":
+            hop, status = goal_hop, "goal"
+        elif kind == "origin":
+            hop, status = 0, "origin"
+        else:
+            hop, status = hops.get(fid, 0), ("frontier" if fid in frontier else "reached")
+        nodes.append({"id": fid, "kind": kind, "label": _cap_label(fact.get("description")),
+                      "status": status, "hop": hop})
+    for hint in hints:
+        nodes.append({"id": hint.get("id"), "kind": "hint",
+                      "label": _cap_label(hint.get("content")), "status": "hint", "hop": 0})
+
+    edges = []
+    for intent in intents:
+        to = intent.get("to")
+        if to:
+            status = "concluded"
+        elif intent.get("worker"):
+            status = "working"
+        else:
+            status = "unclaimed"
+        edges.append({"id": intent.get("id"), "from": intent.get("from") or [], "to": to,
+                      "status": status, "worker": intent.get("worker"),
+                      "label": _cap_label(intent.get("description"))})
+
+    concluded = sum(1 for e in edges if e["status"] == "concluded")
+    open_count = len(edges) - concluded
+    return {
+        "project": {"id": project.get("id"), "title": project.get("title"),
+                    "status": project.get("status")},
+        "nodes": nodes,
+        "edges": edges,
+        "counts": {"facts": len(facts), "hints": len(hints), "intents": len(edges),
+                   "open": open_count, "concluded": concluded},
+        "path": c.goal_path(graph),
+    }
+
+
+def cmd_graph(args):
+    """The project graph as structured data, for the dashboard's diagram."""
+    c = client()
+    data = _graph_payload(c, c.get_project(args.project))
+    if args.json:
+        print(json.dumps(data, indent=2, ensure_ascii=False))
+        return 0
+
+    project, counts = data["project"], data["counts"]
+    print(f"{project['id']}  {project['title']}  [{project['status']}]")
+    print(f"  nodes  {counts['facts']} facts · {counts['hints']} hints · "
+          f"{counts['intents']} intents")
+    print(f"  edges  {counts['open']} open · {counts['concluded']} concluded")
+    for node in sorted(data["nodes"], key=lambda n: (n["hop"], n["id"])):
+        print(f"    hop {node['hop']:>2}  {node['kind']:<6} {node['id']:<8} {node['label']}")
+    for edge in data["edges"]:
+        target = edge["to"] or "(frontier)"
+        print(f"    {edge['status']:<9} {edge['id']:<8} "
+              f"{','.join(edge['from']) or '(none)'} -> {target}  {edge['label']}")
+    if data["path"]:
+        print("  path: " + " -> ".join(step["fact"] for step in data["path"]))
+    return 0
+
+
+def _tail_lines(path, lines):
+    """The last `lines` of a file, reading only its tail rather than all of it."""
+    try:
+        with open(path, "rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            block = min(size, max(4096, lines * 240))
+            handle.seek(size - block)
+            data = handle.read()
+    except OSError:
+        return []
+    text = data.decode("utf-8", errors="replace")
+    tail = text.splitlines()
+    if block < size and tail:
+        tail = tail[1:]          # the seek landed mid-line; that first partial is not a line
+    return tail[-lines:]
+
+
+def _container_logs(lines):
+    """`docker compose logs` for the Cairn server; empty when it is not usable."""
+    compose = _compose_cmd()
+    if compose is None:
+        return []
+    try:
+        out = subprocess.run(compose + ["logs", "--tail", str(lines), "--no-color", CAIRN_SERVICE],
+                             cwd=str(REPO), capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if out.returncode != 0:
+        return []
+    return out.stdout.splitlines()[-lines:]
+
+
+def _newest_log_file():
+    """The most recently written Cairn log file, or None when neither exists."""
+    existing = [(path.stat().st_mtime, name, path)
+                for name, path in (("dispatcher", DISPATCH_LOG), ("server", SERVER_LOG))
+                if path.is_file()]
+    if not existing:
+        return None
+    _mtime, name, path = max(existing)
+    return name, path
+
+
+def _cairn_log_source(requested):
+    """What to read: an explicit source, or whatever is actually running.
+
+    auto prefers a live dispatcher, then a live server, then the compose container,
+    then whichever log file exists and is newest. Returns (source, ref) where ref is
+    a Path, the service name, or None.
+    """
+    if requested == "dispatcher":
+        return "dispatcher", DISPATCH_LOG
+    if requested == "server":
+        return "server", SERVER_LOG
+    if requested == "container":
+        return "container", CAIRN_SERVICE
+    if _pid_alive(DISPATCH_PID):
+        return "dispatcher", DISPATCH_LOG
+    if _pid_alive(SERVER_PID):
+        return "server", SERVER_LOG
+    if _compose_cmd() is not None:
+        return "container", CAIRN_SERVICE
+    newest = _newest_log_file()
+    return newest if newest else ("none", None)
+
+
+def cmd_cairn_logs(args):
+    """The Cairn log tail, from whichever source is live. Never fails on nothing."""
+    source, ref = _cairn_log_source(args.source)
+    lines: list[str] = []
+    if source == "container":
+        lines = _container_logs(args.lines)
+        # The compose file being usable does not mean the container exists. In auto mode
+        # an empty container tail falls back to the newest file, or Cairn being down would
+        # blank the log pane instead of showing its last words.
+        if args.source == "auto" and not lines:
+            newest = _newest_log_file()
+            if newest:
+                source, ref = newest
+    if source == "container":
+        payload: dict[str, object] = {"source": source, "container": ref, "lines": lines}
+    elif source == "none":
+        payload = {"source": source, "lines": []}
+    else:
+        payload = {"source": source, "path": str(ref), "lines": _tail_lines(ref, args.lines)}
+
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False))
+        return 0
+    if source == "none":
+        print("no Cairn log source: no dispatcher, server or compose container is running")
+        return 0
+    where = payload.get("path") or payload.get("container") or ""
+    print(f"# {source} {where}".rstrip())
+    printed = payload.get("lines")
+    for line in (printed if isinstance(printed, list) else []):
+        print(line)
+    return 0
+
+
 def cmd_report(args):
     c = client()
     g = c.get_project(args.project)
@@ -952,6 +1189,9 @@ DISPATCH_PID = STATE_DIR / "dispatcher.pid"
 PROJECT_LINK = ".triad-project"
 SERVER_LOG = STATE_DIR / "server.log"
 DISPATCH_LOG = STATE_DIR / "dispatcher.log"
+# The compose service name, which is what `docker compose logs` takes (not the
+# container_name): the dashboard names it so the reader knows which log they see.
+CAIRN_SERVICE = "cairn-server"
 CAIRN_DIR = REPO / "cairn"
 # The shipped dispatcher config is the template; the machine-specific one is written
 # into .triad/ so a chosen worker model never modifies a tracked file.
@@ -2730,6 +2970,18 @@ def main(argv=None):
     st.add_argument("--project")
     st.add_argument("--path", action="store_true", help="also print the attack path")
     st.set_defaults(func=cmd_status)
+
+    gr = sub.add_parser("graph", help="one project graph as nodes, edges and counts")
+    gr.add_argument("--project", required=True)
+    gr.add_argument("--json", action="store_true", help="the dashboard's layout-ready graph")
+    gr.set_defaults(func=cmd_graph)
+
+    cl = sub.add_parser("cairn-logs", help="tail the Cairn log from whichever source is live")
+    cl.add_argument("--lines", type=int, default=200, help="how many lines to tail (default 200)")
+    cl.add_argument("--json", action="store_true")
+    cl.add_argument("--source", choices=["auto", "dispatcher", "server", "container"],
+                    default="auto", help="which log to read (default: auto)")
+    cl.set_defaults(func=cmd_cairn_logs)
 
     r = sub.add_parser("report", help="render a markdown report from the graph")
     r.add_argument("--project", required=True)
