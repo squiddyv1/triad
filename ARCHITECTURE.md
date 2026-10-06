@@ -222,6 +222,7 @@ host you control, on a network you control, inside an authorized engagement.
 
 | Failure | Symptom | Control |
 |---|---|---|
+| Scan finished but produced nothing | a report exists, the graph stays empty | a report is not a finding: check `vulnerabilities.json` / `findings.sarif` counts; `engage` now says what it posted and points at the report |
 | Strix blocked by WAF | `coverage_gaps`, low findings | carry forward as *unexamined*; never report "clean"; kill the run early (token burn is front-loaded and mostly cache reads) |
 | `--max-budget` doesn't trip | cost reads $0.0000, runs forever | use `--max-turns`; read real usage from `run.json -> llm_usage` |
 | Runaway exploitation | workers keep spawning containers | `runtime.max_workers`, `max_running_projects`, `max_project_workers`, `tasks.reason.max_intents` |

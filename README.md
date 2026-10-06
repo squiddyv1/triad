@@ -75,6 +75,11 @@ The steps are separate commands too, for a scan that is already running or was r
 elsewhere: `triad scan`, `triad findings`, `triad feed`. Feeding twice is safe, since
 hints and intents are only ever added.
 
+A run can also finish with nothing to hand over. Strix writes a report even when the
+assessment never got started, because it ran out of turns or the target blocked it, so a
+report on disk is not a finding. `engage` reports what it actually posted and points at
+the report, rather than leaving the graph quietly empty.
+
 A headless scan prints nothing while it works, so `triad progress` reads the state Strix
 writes as it goes: agents and their status, todos, notes, findings so far, requests and
 tokens. `triad progress -f` keeps printing until the run stops, and `triad view` opens

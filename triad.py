@@ -218,30 +218,44 @@ def cmd_engage(args):
     launch = strix.run_scan(args.target, workdir, instruction_file=args.roe,
                             scan_mode=args.mode, max_turns=args.max_turns)
     print(f"    pid {launch['pid']}; log {launch['log']}")
-    print(f"    waiting up to {args.scan_timeout}s for the run to settle")
-    run_dir = _wait_for_run(workdir, timeout=args.scan_timeout)
+    print(f"    waiting up to {args.scan_timeout}s for the run to settle "
+          "(it stops as soon as the process exits)")
+    run_dir, why = _wait_for_run(workdir, timeout=args.scan_timeout, pid=launch["pid"])
     if run_dir is None:
-        _err("no Strix run directory appeared, so there is nothing to feed")
+        _err("strix exited without creating a run directory, so there is nothing to feed")
+        hint = _strix_log_hint(launch["log"])
+        if hint:
+            print(f"     strix log says: {hint}")
+        print(f"     full log: {launch['log']}")
         if held:
             _warn("cairn stays paused, because nothing was fed to it")
             print("     start it on the unfed graph with:  triad up")
-        print(f"     check {launch['log']}, then:  triad feed --project {pid} --workdir {workdir}")
+        print(f"     if a run turns up later:  triad feed --project {pid} --workdir {workdir}")
         return 1
 
-    print(f"    run: {run_dir.name}")
+    print(f"    run: {run_dir.name}  ({_why_text(why, args.scan_timeout)})")
     print(f"\n2/2 feeding it into {pid}")
+    before = c.get_project(pid)
     run, posted_hints, posted_intents = _feed_run(c, pid, workdir, None, args.anchor)
+    after = c.get_project(pid)
     summary.update({"findings": len(run["findings"]),
                     "coverage_gaps": len(run["coverage_gaps"]),
                     "hints_posted": len(posted_hints),
                     "intents_posted": len(posted_intents)})
     print(f"    findings {len(run['findings'])}  coverage gaps {len(run['coverage_gaps'])}")
-    print(f"    hints {len(posted_hints)}  intents {len(posted_intents)}")
-    if not run["findings"]:
-        _warn("the scan found nothing, so the graph gained only coverage gaps")
-    if run.get("status") in ("running", "in_progress", None):
-        _warn("that run had not finished; feeding it again later is safe (hints and")
-        _warn("intents are additive, so re-run: triad feed --project ... --workdir ...)")
+    print(f"    posted {len(posted_hints)} hints, {len(posted_intents)} intents")
+    print(f"    graph now: {_graph_delta(before, after)}")
+    if not posted_hints and not posted_intents:
+        _warn("nothing was posted: that run has no findings and no coverage gaps to hand over")
+        report = _report_pointer(run_dir)
+        if report:
+            print(f"     it wrote a report instead: {report}")
+            print("     a report can exist with zero findings; read it before concluding anything")
+        else:
+            print(f"     check the run itself:  triad findings --workdir {workdir}")
+    if why in ("exited", "timeout") or run.get("status") in ("running", "in_progress", None):
+        _warn("that run had not settled, so re-feed once it has; hints and intents")
+        print(f"     are additive:  triad feed --project {pid} --workdir {workdir}")
 
     # The findings are in the graph now, so Cairn can work it. Releasing it here is
     # the second half of the sequencing, not an afterthought.
@@ -279,32 +293,129 @@ def cmd_scan(args):
         print("  (not waiting; watch it with: triad progress, or triad view for the dashboard)")
         return 0
     print("  waiting for the run directory to appear and settle...")
-    run_dir = _wait_for_run(workdir, timeout=args.wait_timeout)
+    run_dir, why = _wait_for_run(workdir, timeout=args.wait_timeout, pid=res["pid"])
     if run_dir is None:
-        print("  !! no run directory appeared in time")
+        _err("strix exited without creating a run directory")
+        hint = _strix_log_hint(res["log"])
+        if hint:
+            print(f"     strix log says: {hint}")
+        print(f"     full log: {res['log']}")
         return 1
-    print(f"  run dir: {run_dir}")
+    print(f"  run dir: {run_dir}  ({_why_text(why, args.wait_timeout)})")
     return 0
 
 
-def _wait_for_run(workdir, timeout):
+def _pid_state(pid):
+    """'running', 'gone', or 'unknown'. A zombie counts as gone: we never reaped it.
+
+    The scan is launched detached and never waited on, so when it exits it stays a zombie
+    for as long as this process lives, and `os.kill(pid, 0)` keeps succeeding on it.
+    """
+    if not pid or pid <= 0:
+        return "gone"
+    stat = Path(f"/proc/{pid}/stat")
+    if not stat.exists():
+        if Path("/proc").is_dir():
+            return "gone"                       # /proc exists and has no entry for it
+        try:
+            os.kill(pid, 0)                     # no /proc (macOS): best effort
+            return "running"
+        except ProcessLookupError:
+            return "gone"
+        except PermissionError:
+            return "running"
+    try:
+        state = stat.read_text(encoding="utf-8", errors="replace").rpartition(")")[2].split()[0]
+    except (OSError, IndexError):
+        return "unknown"
+    return "gone" if state == "Z" else "running"
+
+
+def _run_status(run_dir):
+    """The status run.json reports, or None when it is missing or unreadable."""
+    try:
+        return json.loads((run_dir / "run.json").read_text(encoding="utf-8")).get("status")
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+def _newest_mtime(path):
+    """The most recent write anywhere under `path`, or 0 when nothing can be read."""
+    newest = 0.0
+    for entry in path.rglob("*"):
+        try:
+            newest = max(newest, entry.stat().st_mtime)
+        except OSError:
+            continue
+    return newest
+
+
+def _wait_for_run(workdir, timeout, pid=None, quiet=180):
+    """Wait for a launched scan to settle. Returns (run_dir, reason).
+
+    Waiting on run.json's status alone outlives the scan: a killed run, or one whose final
+    status write never lands, leaves `status: running` for good, so the wait runs its whole
+    timeout while the process has been gone for an hour. Three better signals, in order:
+
+      finished  run.json reached a terminal status
+      exited    the process we launched is gone (the zombie still answers kill(pid, 0))
+      quiet     results exist and nothing has been written for `quiet` seconds
+      timeout   still running; feed what is there so far, since re-feeding is additive
+    """
     deadline = time.time() + timeout
     last = None
     while time.time() < deadline:
-        d = strix.latest_run_dir(workdir)
-        if d:
-            last = d
-            if (d / "run.json").is_file():
-                try:
-                    status = json.loads((d / "run.json").read_text()).get("status")
-                except (json.JSONDecodeError, OSError):
-                    status = None
-                if status and status not in ("running", "in_progress", None):
-                    return d
-            elif (d / "vulnerabilities.json").is_file() or (d / "findings.sarif").is_file():
-                return d
+        run_dir = strix.latest_run_dir(workdir)
+        if run_dir:
+            last = run_dir
+            status = _run_status(run_dir)
+            if status and status not in ("running", "in_progress", None):
+                return run_dir, "finished"
+        if pid and _pid_state(pid) == "gone":
+            return last, "exited" if last else "no-run"
+        if last:
+            has_results = ((last / "vulnerabilities.json").is_file()
+                           or (last / "findings.sarif").is_file())
+            newest = _newest_mtime(last)
+            if has_results and newest and (time.time() - newest) >= quiet:
+                return last, "quiet"
         time.sleep(10)
-    return last
+    return last, "timeout"
+
+
+def _why_text(why, timeout=None):
+    """Why the wait stopped, in words that say what to do about it."""
+    return {
+        "finished": "run.json reports it finished",
+        "exited": "the Strix process exited while run.json still said running; feeding what is on disk",
+        "quiet": "results stopped changing, so the run is treated as settled",
+        "timeout": f"still running after {timeout}s; feeding what is there so far",
+    }.get(why, why)
+
+
+def _report_pointer(run_dir):
+    """The markdown report Strix writes, when it wrote one.
+
+    A run can finish and produce a report that says the assessment never got started
+    (`--max-turns` too low, a blocked target), so a report on disk is not evidence of a
+    finding, and its absence is not evidence of a clean target either.
+    """
+    report = Path(run_dir) / "penetration_test_report.md"
+    return report if report.is_file() else None
+
+
+def _graph_delta(before, after):
+    """What a feed changed, counted from the graph Cairn returns rather than assumed.
+
+    get_project answers with {project, facts, hints, intents}; the *_count fields only
+    exist on the list endpoint, so count the lists.
+    """
+    parts = []
+    for label in ("hints", "intents", "facts"):
+        was = len(before.get(label) or [])
+        now = len(after.get(label) or [])
+        parts.append(f"{label} {now} (+{now - was})")
+    return "  ".join(parts)
 
 
 def cmd_findings(args):
@@ -392,12 +503,21 @@ def cmd_view(args):
 
 
 def cmd_feed(args):
+    c = client()
+    before = c.get_project(args.project)
     run, posted_hints, posted_intents = _feed_run(
-        client(), args.project, args.workdir, args.run, args.anchor)
+        c, args.project, args.workdir, args.run, args.anchor)
+    after = c.get_project(args.project)
     print(f"fed run {run['run']} -> {args.project}")
     print(f"  findings: {len(run['findings'])}  gaps: {len(run['coverage_gaps'])}")
-    print(f"  hints posted:   {posted_hints}")
-    print(f"  intents posted: {posted_intents}")
+    print(f"  posted {len(posted_hints)} hints, {len(posted_intents)} intents")
+    print(f"  graph now: {_graph_delta(before, after)}")
+    if not posted_hints and not posted_intents:
+        _warn("nothing was posted: that run has no findings and no coverage gaps to hand over")
+        report = _report_pointer(run.get("run_dir") or "")
+        if report:
+            print(f"  it wrote a report instead: {report}")
+            print("  a report can exist with zero findings; read it before concluding anything")
     return 0
 
 
@@ -782,7 +902,32 @@ def _warn(text):
 
 
 def _err(text):
+    sys.stdout.flush()          # keep stderr's line in order with what was just printed
     print(f"  {_colour('✗', _RED)} {text}", file=sys.stderr)
+
+
+def _strix_log_hint(log_path):
+    """Name the reason a scan stopped, from the log it wrote, when we can recognise it.
+
+    "Read the log" is the least useful half of information already on disk, and the
+    common failures here (provider, credits, docker) each have a signature.
+    """
+    try:
+        text = Path(log_path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    signatures = (
+        ("LLM CONNECTION FAILED", "the model provider refused the connection"),
+        ("requires more credits", "the provider account is out of credit"),
+        ("Invalid credential", "the provider rejected the key"),
+        ("Cannot connect to the Docker daemon", "Docker is not running"),
+        ("permission denied while trying to connect", "no permission for the Docker socket"),
+        ("Max turns", "it hit the turn cap"),
+    )
+    for needle, plain in signatures:
+        if needle in text:
+            return plain
+    return None
 
 
 def _env_path():
