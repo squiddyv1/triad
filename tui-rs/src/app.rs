@@ -229,6 +229,12 @@ impl App {
         &self.cpu_history
     }
 
+    /// Whether the CPU history has anything worth plotting. An empty or all-zero history
+    /// leaves a bare `cpu` label over nothing, so the row is dropped instead.
+    pub fn cpu_signal(&self) -> bool {
+        self.cpu_history.iter().any(|&value| value > 0)
+    }
+
     pub fn proc_cpu(&self, pid: i64) -> Option<f64> {
         self.proc_cpu.get(&pid).copied().flatten()
     }
@@ -261,10 +267,6 @@ impl App {
 
     pub fn graph_layout(&self) -> Option<&Layout> {
         self.graph_layout.as_ref()
-    }
-
-    pub fn graph_scroll(&self) -> u16 {
-        self.graph_scroll
     }
 
     pub fn graph_max_scroll(&self) -> u16 {

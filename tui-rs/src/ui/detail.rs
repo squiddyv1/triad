@@ -34,10 +34,10 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &App) {
     // and telemetry blocks at the bottom of the pane.
     let strix = strix_lines(run);
     let cairn_height: u16 = if run.project.is_some() { 6 } else { 3 };
-    // The sparkline only earns a row when there are samples behind it: an empty labelled
-    // row was Stage 1's bug. Without a run process there is nothing to plot, so the block
-    // is one row shorter.
-    let telemetry_height: u16 = if app.cpu_history().is_empty() { 5 } else { 6 };
+    // The sparkline only earns a row when there is real signal behind it: an empty or
+    // flat-zero history was Stage 1's bare `cpu` label over nothing, so both drop the row
+    // and the block is one row shorter.
+    let telemetry_height: u16 = if app.cpu_signal() { 6 } else { 5 };
     let fixed = cairn_height + telemetry_height;
     let strix_height = (strix.len() as u16 + 2)
         .min(area.height.saturating_sub(fixed))
@@ -350,8 +350,9 @@ fn draw_telemetry(frame: &mut Frame, area: Rect, app: &App) {
         )],
     );
 
-    if app.cpu_history().is_empty() {
-        // No samples: drop the whole row rather than leave `cpu` labelled over nothing.
+    if !app.cpu_signal() {
+        // No samples or a flat-zero history: drop the whole row rather than leave `cpu`
+        // labelled over nothing.
         frame.render_widget(
             Paragraph::new(elide_lines(
                 vec![proc_line, dispatcher, poll_line],
