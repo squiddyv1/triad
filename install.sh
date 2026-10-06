@@ -9,6 +9,7 @@
 #   ./install.sh --no-docker     never install Docker, only report it
 #   ./install.sh --no-uv         never install uv, only report it
 #   ./install.sh --no-worker     never install a worker CLI, only report it
+#   ./install.sh --no-tui        never install the dashboard's node modules
 #   ./install.sh --detect-only   report what is present, install nothing
 #   ./install.sh --check         verify an existing install, change nothing
 #   ./install.sh --uninstall     remove the symlinks this script created
@@ -51,6 +52,8 @@ WITH_HERMES=0
 # Docker is installed by default, because Strix's sandbox and Cairn's container
 # mode both need it; --no-docker (or DOCKER_INSTALL_METHOD=none) opts out.
 DOCKER_INSTALL_METHOD="${DOCKER_INSTALL_METHOD:-}"
+# The dashboard's node modules: installed when node is there, skipped on request.
+TUI_INSTALL_METHOD="${TUI_INSTALL_METHOD:-}"
 for arg in "$@"; do
   case "$arg" in
     --check)        MODE="check" ;;
@@ -63,11 +66,13 @@ for arg in "$@"; do
                     UV_INSTALL_METHOD="none" ;;
     --no-worker)
                     WORKER_INSTALL_METHOD="none" ;;
+    --no-tui)
+                    TUI_INSTALL_METHOD="none" ;;
     --with-hermes|--all)
                     WITH_HERMES=1 ;;
     --with-strix)
                     : ;;   # Strix is part of the normal flow and installs anyway
-    -h|--help)      sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help)      sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *)              echo "unknown option: $arg (try --help)" >&2; exit 2 ;;
   esac
 done
@@ -514,6 +519,42 @@ ensure_worker_cli() {
   return 0
 }
 
+ensure_tui() {
+  local tui="$TRIAD_HOME/tui"
+  if [ ! -d "$tui" ]; then
+    warn "no tui/ directory; the dashboard is not available"
+    return 1
+  fi
+  if [ -d "$tui/node_modules/ink" ]; then
+    ok "dashboard dependencies already installed"
+    return 0
+  fi
+  if [ "${TUI_INSTALL_METHOD:-$INSTALL_METHOD}" = "none" ]; then
+    warn "dashboard dependencies not installed (installation is disabled)"
+    warn "  install them when you want the dashboard:  cd $tui && npm install"
+    return 1
+  fi
+  refresh_path
+  if ! have node; then
+    warn "node is not installed; the dashboard needs Node 18 or newer"
+    warn "  the CLI does everything the dashboard shows. Install node, then:"
+    warn "  cd $tui && npm install"
+    return 1
+  fi
+  if ! have npm; then
+    warn "npm is not on PATH; install the dependencies yourself:  cd $tui && npm install"
+    return 1
+  fi
+  echo "  installing the dashboard's dependencies with npm (ink, react)"
+  if ( cd "$tui" && npm install --silent --no-audit --no-fund >/dev/null 2>&1 ); then
+    ok "dashboard ready:  triad tui"
+    return 0
+  fi
+  warn "npm install failed in $tui; the CLI is unaffected"
+  warn "  try it yourself:  cd $tui && npm install"
+  return 1
+}
+
 ensure_strix() {
   if strix_present; then ok "strix already installed"; return 0; fi
   local rc=0
@@ -655,6 +696,10 @@ ensure_docker || warn "docker is not usable; Strix will not run until it is"
 # Strix, the discovery layer: the normal Strix -> Cairn flow depends on it.
 hdr "Strix (discovery layer)"
 ensure_strix   || warn "Strix is not installed; the discovery layer will be unavailable"
+# The dashboard is optional: it renders what the CLI already reports, and nothing
+# in the flow depends on it, so a failure here is a warning rather than a stop.
+hdr "Dashboard (optional)"
+ensure_tui     || warn "the dashboard is unavailable; the CLI is unaffected"
 # Hermes: optional, and only touched when asked for. Rather than a no-op flag,
 # this is the one place the control plane gets installed.
 if [ "$WITH_HERMES" = 1 ] && [ "$INSTALL_METHOD" != "none" ]; then

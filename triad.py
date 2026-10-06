@@ -101,13 +101,32 @@ def _slug(text, fallback="engagement"):
     return cleaned[:48] or fallback
 
 
+def _workdir_root():
+    """The directory engagement subdirectories live under."""
+    base = (os.environ.get("TRIAD_WORKDIR") or _env_read().get("TRIAD_WORKDIR")
+            or strix.DEFAULT_WORKDIR)
+    return Path(base).expanduser().resolve()
+
+
 def _strix_workdir(args):
     """Where strix_runs/ lives: --workdir, else TRIAD_WORKDIR, else ~/engagements."""
     if getattr(args, "workdir", None):
         return Path(args.workdir).expanduser().resolve()
-    base = (os.environ.get("TRIAD_WORKDIR") or _env_read().get("TRIAD_WORKDIR")
-            or strix.DEFAULT_WORKDIR)
-    return Path(base).expanduser().resolve()
+    return _workdir_root()
+
+
+def _engagement_dirs():
+    """Engagement directories under the root: anything holding a strix_runs/ or a pid."""
+    root = _workdir_root()
+    found = []
+    if (root / "strix_runs").is_dir():
+        found.append(root)                      # a scan run straight into the root
+    if root.is_dir():
+        for entry in sorted(root.iterdir()):
+            if entry.is_dir() and ((entry / "strix_runs").is_dir()
+                                   or (entry / strix.PID_FILE).is_file()):
+                found.append(entry)
+    return found
 
 
 def _engage_workdir(args):
@@ -147,6 +166,15 @@ def _elapsed(start, end=None):
     return f"{minutes // 60}h{minutes % 60:02d}m" if minutes >= 60 else f"{minutes}m"
 
 
+def _project_link(workdir):
+    """The Cairn project this engagement fed into, so a dashboard can pair the two."""
+    try:
+        text = (Path(workdir).expanduser() / PROJECT_LINK).read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return text or None
+
+
 def _feed_run(c, project, workdir, run_id=None, anchor="origin"):
     """Read a run and post its leads. Returns (run, hint_ids, intent_ids).
 
@@ -155,6 +183,10 @@ def _feed_run(c, project, workdir, run_id=None, anchor="origin"):
     """
     run = strix.read_run(Path(workdir).expanduser(), run_id)
     posted_hints, posted_intents = strix.post_leads(c, project, run, anchor)
+    try:
+        (Path(workdir).expanduser() / PROJECT_LINK).write_text(project, encoding="utf-8")
+    except OSError:
+        pass
     return run, posted_hints, posted_intents
 
 
@@ -306,7 +338,7 @@ def cmd_scan(args):
 
 
 def _pid_state(pid):
-    """'running', 'gone', or 'unknown'. A zombie counts as gone: we never reaped it.
+    """'running', 'stopped', 'gone', or 'unknown'. A zombie counts as gone: never reaped.
 
     The scan is launched detached and never waited on, so when it exits it stays a zombie
     for as long as this process lives, and `os.kill(pid, 0)` keeps succeeding on it.
@@ -328,7 +360,9 @@ def _pid_state(pid):
         state = stat.read_text(encoding="utf-8", errors="replace").rpartition(")")[2].split()[0]
     except (OSError, IndexError):
         return "unknown"
-    return "gone" if state == "Z" else "running"
+    if state == "Z":
+        return "gone"
+    return "stopped" if state in ("T", "t") else "running"
 
 
 def _run_status(run_dir):
@@ -502,6 +536,183 @@ def cmd_view(args):
         return 0
 
 
+def _find_scan_pid(workdir):
+    """A strix process whose working directory is this engagement.
+
+    The fallback for a scan that recorded no pid: started before that was written, or
+    started by something else. Without it those runs are visible but uncontrollable.
+    """
+    target = Path(workdir).expanduser().resolve()
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            cmdline = (entry / "cmdline").read_bytes().replace(b"\0", b" ").decode("utf-8", "replace")
+            if "strix" not in cmdline or (entry / "cwd").resolve() != target:
+                continue
+        except (OSError, ValueError):
+            continue
+        return int(entry.name)
+    return None
+
+
+def _signal_scan(pid, sig):
+    """Signal the scan's whole process group, falling back to the process alone."""
+    try:
+        os.killpg(os.getpgid(pid), sig)
+    except OSError:
+        os.kill(pid, sig)
+
+
+def _snapshot():
+    """Everything a dashboard needs in one call: runs, projects, dispatcher.
+
+    The TUI polls this instead of re-deriving state, so the CLI and the dashboard cannot
+    disagree about what is running. The recorded pid belongs to the workdir's newest run,
+    which is the one a launch from that directory produced.
+    """
+    cairn_up = _cairn_up()
+    projects = []
+    if cairn_up:
+        try:
+            projects = client().list_projects()
+        except (urllib.error.URLError, OSError, ValueError):
+            projects = []
+
+    runs = []
+    for workdir in _engagement_dirs():
+        pid = strix.read_pid(workdir) or _find_scan_pid(workdir)
+        state = _pid_state(pid) if pid else "gone"
+        live = state in ("running", "stopped")
+        project = _project_link(workdir)
+        runs_dir = workdir / "strix_runs"
+        if not runs_dir.is_dir():
+            continue
+        dirs = [d for d in runs_dir.iterdir() if d.is_dir()]
+        for index, run_dir in enumerate(sorted(dirs, key=lambda d: d.stat().st_mtime, reverse=True)):
+            try:
+                progress = strix.run_progress(workdir, run_dir.name)
+            except (OSError, ValueError):
+                continue
+            current = index == 0 and live
+            progress.update({"workdir": str(workdir), "live": current, "project": project,
+                             "pid": pid if current else None,
+                             "paused": current and state == "stopped"})
+            runs.append(progress)
+
+    dispatcher = _pid_alive(DISPATCH_PID)
+    return {
+        "root": str(_workdir_root()),
+        "cairn": {"base": _base_url(), "up": cairn_up, "projects": projects},
+        "dispatcher": {"pid": dispatcher, "alive": bool(dispatcher)},
+        "runs": runs,
+    }
+
+
+def cmd_runs(args):
+    """Every run triad knows about, newest first. The dashboard opens on this."""
+    snapshot = _snapshot()
+    if args.json:
+        print(json.dumps(snapshot, indent=2))
+        return 0
+
+    cairn = snapshot["cairn"]
+    print(f"cairn       {cairn['base']}  {'up' if cairn['up'] else 'DOWN'}  "
+          f"{len(cairn['projects'])} project(s)")
+    print("dispatcher  " + (f"alive, pid {snapshot['dispatcher']['pid']}"
+                            if snapshot["dispatcher"]["alive"] else "stopped"))
+    print(f"root        {snapshot['root']}")
+    if not snapshot["runs"]:
+        print("\nno Strix runs yet")
+        return 0
+    print()
+    for r in snapshot["runs"]:
+        state = "paused" if r["paused"] else ("running" if r["live"] else (r["status"] or "?"))
+        print(f"  {r['run'][:32]:<32} {state:<9} {_elapsed(r['start_time'], r['end_time']):>7}  "
+              f"find {r['findings']:<3} gaps {r['coverage_gaps']:<3} "
+              f"agents {r['agents']['completed']}/{r['agents']['total']}  "
+              f"{r['project'] or '-':<10} {r['workdir']}")
+    return 0
+
+
+def cmd_control(args):
+    """Pause, resume, stop or delete a scan or a project. The dashboard's keys call this."""
+    action = args.action
+
+    if args.project:
+        c = client()
+        try:
+            if action == "delete":
+                c.delete_project(args.project)
+                _ok(f"deleted project {args.project}")
+            elif action in ("pause", "stop"):
+                c.set_status(args.project, "stopped")
+                _ok(f"{args.project} stopped: exploration writes are rejected until it resumes")
+            elif action == "resume":
+                c.set_status(args.project, "active")
+                _ok(f"{args.project} is active again")
+            else:
+                _err(f"'{action}' is not a project action")
+                return 2
+        except Exception as e:
+            _err(f"{action} failed: {e}")
+            return 1
+        return 0
+
+    if not args.workdir:
+        _err("nothing to act on: give --workdir for a scan, or --project for a project")
+        return 2
+    workdir = Path(args.workdir).expanduser().resolve()
+    pid = strix.read_pid(workdir) or _find_scan_pid(workdir)
+    state = _pid_state(pid) if pid else "gone"
+    if state == "gone":
+        _err(f"no live scan recorded in {workdir}")
+        return 1
+
+    if action == "delete":
+        if not args.run:
+            _err("deleting a run needs --run <name>")
+            return 2
+        target = workdir / "strix_runs" / args.run
+        if not target.is_dir() or target.parent.name != "strix_runs":
+            _err(f"not a run directory: {target}")
+            return 1
+        shutil.rmtree(target)
+        _ok(f"deleted run {args.run} (its findings are gone; a fed graph keeps its hints)")
+        return 0
+
+    if action == "pause":
+        _signal_scan(pid, signal.SIGSTOP)
+        _ok(f"paused the scan (pid {pid}); resume:  triad control resume --workdir {workdir}")
+    elif action == "resume":
+        _signal_scan(pid, signal.SIGCONT)
+        _ok(f"resumed the scan (pid {pid})")
+    else:
+        _signal_scan(pid, signal.SIGTERM)
+        _ok(f"stopped the scan (pid {pid}); its artifacts stay in {workdir}/strix_runs")
+    return 0
+
+
+def cmd_tui(args):
+    """Open the dashboard: every run, its progress, its telemetry, its controls."""
+    tui = _repo_root() / "tui"
+    if not (tui / "node_modules" / "ink").is_dir():
+        _err("the dashboard's dependencies are not installed yet")
+        print(f"     cd {tui} && npm install")
+        return 1
+    node = shutil.which("node")
+    if not node:
+        _err("node is not on PATH; the dashboard needs Node 18 or newer")
+        return 1
+    cmd = [node, "--import", "tsx/esm", str(tui / "src" / "index.tsx")]
+    if getattr(args, "interval", None):
+        cmd += ["--interval", str(args.interval)]
+    try:
+        return subprocess.call(cmd, cwd=str(tui))
+    except KeyboardInterrupt:
+        return 0
+
+
 def cmd_feed(args):
     c = client()
     before = c.get_project(args.project)
@@ -628,6 +839,9 @@ def cmd_report(args):
 STATE_DIR = REPO / ".triad"
 SERVER_PID = STATE_DIR / "server.pid"
 DISPATCH_PID = STATE_DIR / "dispatcher.pid"
+
+# Written into an engagement directory when its run is fed, so the pairing survives.
+PROJECT_LINK = ".triad-project"
 SERVER_LOG = STATE_DIR / "server.log"
 DISPATCH_LOG = STATE_DIR / "dispatcher.log"
 CAIRN_DIR = REPO / "cairn"
@@ -2150,7 +2364,7 @@ def cmd_home(args):
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(prog="triad", description=__doc__.splitlines()[0])
+    ap = argparse.ArgumentParser(prog="triad", description=(__doc__ or "triad").splitlines()[0])
     sub = ap.add_subparsers(dest="cmd")
 
     su = sub.add_parser("setup", help="interactive first run: keys, then start the stack")
@@ -2245,6 +2459,21 @@ def main(argv=None):
     vw.add_argument("--host", help="0.0.0.0 to expose it beyond localhost")
     vw.add_argument("--no-open", action="store_true", help="do not open a browser")
     vw.set_defaults(func=cmd_view)
+
+    rn = sub.add_parser("runs", help="every run triad knows about, newest first")
+    rn.add_argument("--json", action="store_true", help="the dashboard's data, verbatim")
+    rn.set_defaults(func=cmd_runs)
+
+    ct = sub.add_parser("control", help="pause, resume, stop or delete a scan or a project")
+    ct.add_argument("action", choices=["pause", "resume", "stop", "delete"])
+    ct.add_argument("--workdir", help="the engagement directory of the scan")
+    ct.add_argument("--run", help="run name, when deleting a run")
+    ct.add_argument("--project", help="a Cairn project id, instead of a scan")
+    ct.set_defaults(func=cmd_control)
+
+    tu = sub.add_parser("tui", help="open the dashboard: runs, progress, telemetry, controls")
+    tu.add_argument("--interval", type=float, help="seconds between refreshes")
+    tu.set_defaults(func=cmd_tui)
 
     fd = sub.add_parser("feed", help="post a Strix run into the Cairn graph")
     fd.add_argument("--project", required=True)

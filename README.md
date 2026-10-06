@@ -98,8 +98,26 @@ Strix's own dashboard for a live or finished run.
 | `triad scan` / `findings` / `feed` | those same steps on their own |
 | `triad progress` | how far along a running scan is, from its own state files |
 | `triad view` | open Strix's dashboard for a live or finished run |
+| `triad tui` | the terminal dashboard: every run, its telemetry, its controls |
+| `triad runs` | every run triad knows about, newest first |
+| `triad control` | pause, resume, stop or delete a scan or a project |
 | `triad watch` / `report` | follow the graph, then write it up |
 | `triad auth` | rewrite the worker's credentials from `.env`; `--show` to inspect |
+
+## Dashboard
+
+`triad tui` opens a terminal dashboard over the same state the CLI reports: every run with
+its status, the Strix progress of the selected one (agents, todos, notes, findings,
+tokens), the Cairn project it fed into (facts, hints, intents, open work), and live
+telemetry for the sandbox container, the scan process and the dispatcher.
+
+Keys act on whichever side the footer names as the target. `tab` switches between the run
+and its graph, `p` pauses or resumes it, `s` stops it, `d` deletes it after asking, `f`
+feeds the run into its project again. A scan whose process is gone reads `stale` rather
+than `running`, because run.json keeps saying running after a kill.
+
+It needs Node 18 or newer, and `./install.sh` installs its dependencies unless you pass
+`--no-tui`. Nothing in the flow depends on it.
 
 ## What is in the repo
 
@@ -112,6 +130,7 @@ dispatch.yaml         worker pool, model routing, concurrency caps
 dispatch.local.yaml   no-Docker and arm64 fallback
 contracts/            the handoff schema and the rules-of-engagement template
 plugin/               the strix_* and cairn_* tools
+tui/                  the terminal dashboard (Ink); node_modules are installed, not committed
 mcp/cairn_mcp.py      the Cairn graph as an MCP server
 assets/               the banner and the mark
 ```

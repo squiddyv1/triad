@@ -21,3 +21,6 @@ __pycache__/
 .venv/
 venv/
 *.egg-info/
+
+# --- dashboard (dependencies are installed by install.sh, never committed) ---
+tui/node_modules/

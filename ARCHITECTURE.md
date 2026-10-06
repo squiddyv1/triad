@@ -302,7 +302,28 @@ random): `docker ps -q --filter ancestor=ghcr.io/usestrix/strix-sandbox:1.3.0`, 
 Exhausting `--max-turns` marks the run `failed` (`MaxTurnsExceeded`) even when it produced
 findings, so read the artifacts and the log rather than the status field alone.
 
-### 4.7 Not built yet
+### 4.7 The dashboard
+
+`triad tui` is an Ink (React for terminals) app over `triad runs --json`: one poll of that
+one command, so the dashboard cannot disagree with the CLI about what is running. It shows
+the runs, the Strix progress of the selected one, the Cairn project that run fed into, and
+telemetry gathered where it actually lives: `docker stats` for the sandbox and the Cairn
+server, and `/proc/<pid>/{stat,status}` deltas for the scan and dispatcher processes (CPU
+is a delta between polls, since the kernel counters are cumulative).
+
+Every control goes back through `triad control`, so the dashboard cannot invent a state
+change the CLI does not support: pause is `SIGSTOP` on the scan's process group, resume is
+`SIGCONT`, stop is `SIGTERM`, and for a project they are `status: stopped` / `status:
+active` / `DELETE`. Deleting a run removes only a directory inside `strix_runs/`, and the
+UI asks first.
+
+Two details the UI depends on and the CLI provides: a launch records its pid in
+`<workdir>/strix_last_launch.pid` (with a `/proc` search by working directory as the
+fallback, so scans started before that or by another tool are still controllable), and a
+feed writes the project id into `<workdir>/.triad-project`, which is what pairs a run with
+its graph.
+
+### 4.8 Not built yet
 
 The controls the design asks for but this repo does not implement: an egress proxy with
 an allowlist generated from the scope file, a denylist of destructive actions enforced in

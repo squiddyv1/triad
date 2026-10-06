@@ -22,6 +22,9 @@ from pathlib import Path
 
 COVERAGE_RULE_PREFIX = "strix-coverage/"
 
+# Where a launched scan's pid is recorded, so it can be paused or stopped later.
+PID_FILE = "strix_last_launch.pid"
+
 # Where scans, reports and engagement artifacts live when nothing overrides it.
 DEFAULT_WORKDIR = "~/engagements"
 
@@ -84,8 +87,21 @@ def run_scan(target, cwd, instruction_file=None, instruction=None, scan_mode="qu
     env.setdefault("STRIX_TELEMETRY", "0")
     proc = subprocess.Popen(cmd, cwd=str(cwd), stdout=fh, stderr=subprocess.STDOUT,
                             start_new_session=True, env=env)
-    return {"pid": proc.pid, "cwd": str(cwd), "cmd": cmd,
+    # The pid is what makes a running scan controllable (pause, stop) after the fact:
+    # nothing else on disk records which process belongs to which workdir.
+    pid_file = cwd / PID_FILE
+    pid_file.write_text(str(proc.pid), encoding="utf-8")
+    return {"pid": proc.pid, "cwd": str(cwd), "cmd": cmd, "pid_file": str(pid_file),
             "log": str(log), "note": "poll strix_runs/ for artifacts"}
+
+
+def read_pid(cwd) -> int | None:
+    """The pid of the scan launched from this workdir, if one was recorded."""
+    try:
+        pid = int((Path(cwd).expanduser() / PID_FILE).read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return None
+    return pid if pid > 0 else None
 
 
 def latest_run_dir(cwd) -> Path | None:
