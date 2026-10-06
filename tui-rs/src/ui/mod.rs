@@ -3,6 +3,7 @@
 
 mod cairn;
 mod detail;
+mod form;
 mod header;
 mod list;
 mod strix;
@@ -13,7 +14,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
-use crate::app::{App, DetailPane, Page, Target};
+use crate::app::{App, DetailPane, MessageKind, Page, Target};
 use crate::theme;
 
 /// Width of the left column: wide enough for a 23-char run name, a 9-char state and the
@@ -27,7 +28,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
     let [header_area, body_area, footer_area] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(3),
-        Constraint::Length(1),
+        Constraint::Length(app.footer_height()),
     ])
     .areas(frame.area());
 
@@ -42,6 +43,13 @@ pub fn draw(frame: &mut Frame, app: &App) {
             list::draw(frame, left_area, app);
             strix::draw(frame, modal_area, app);
         }
+        Page::Form => {
+            let [left_area, form_area] =
+                Layout::horizontal([Constraint::Length(LEFT_WIDTH), Constraint::Min(24)])
+                    .areas(body_area);
+            list::draw(frame, left_area, app);
+            form::draw(frame, form_area, app);
+        }
         Page::Dashboard => {
             let [left_area, detail_area] =
                 Layout::horizontal([Constraint::Length(LEFT_WIDTH), Constraint::Min(24)])
@@ -55,7 +63,41 @@ pub fn draw(frame: &mut Frame, app: &App) {
 }
 
 fn draw_footer(frame: &mut Frame, area: ratatui::layout::Rect, app: &App) {
+    // The dashboard footer stacks a submit status line above its keys, so it is rendered as
+    // a paragraph rather than the single line every other page uses.
+    if app.page() == Page::Dashboard {
+        let mut lines: Vec<Line> = Vec::new();
+        if let Some(message) = app.message() {
+            let (prefix, colour) = match message.kind {
+                MessageKind::Err => ("✗ ", ratatui::style::Color::Red),
+                MessageKind::Ok => ("✓ ", ratatui::style::Color::Green),
+                MessageKind::Info => ("  ", ratatui::style::Color::Gray),
+            };
+            lines.push(Line::from(Span::styled(
+                format!("{prefix}{}", message.text),
+                Style::new().fg(colour),
+            )));
+        }
+        let target = match app.target() {
+            Target::Run => "run",
+            Target::Cairn => "cairn",
+        };
+        lines.push(Line::from(vec![
+            Span::styled(
+                "n new   ↑/↓ or k/j select   tab target   enter open   r refresh   q quit   ",
+                theme::dim(),
+            ),
+            Span::styled(format!("target: {target}"), theme::accent()),
+        ]));
+        frame.render_widget(Paragraph::new(lines), area);
+        return;
+    }
+
     let mut spans = match app.page() {
+        Page::Form => vec![Span::styled(
+            "form open: esc cancels, no other key acts",
+            theme::dim(),
+        )],
         Page::Cairn => {
             let mut spans: Vec<Span> = vec![Span::styled(
                 "esc close   tab pane   ↑/↓ scroll   g/G top/end   r refetch   q quit   ",
@@ -78,19 +120,7 @@ fn draw_footer(frame: &mut Frame, area: ratatui::layout::Rect, app: &App) {
             }
             spans
         }
-        Page::Dashboard => {
-            let target = match app.target() {
-                Target::Run => "run",
-                Target::Cairn => "cairn",
-            };
-            vec![
-                Span::styled(
-                    "↑/↓ or k/j select   tab target   enter open   r refresh   q quit   ",
-                    theme::dim(),
-                ),
-                Span::styled(format!("target: {target}"), theme::accent()),
-            ]
-        }
+        Page::Dashboard => unreachable!("the dashboard footer returns above"),
         Page::Detail => {
             let mut spans: Vec<Span> = vec![Span::styled(
                 "esc close   tab pane   ↑/↓ scroll   g/G top/end   r refetch   q quit   ",

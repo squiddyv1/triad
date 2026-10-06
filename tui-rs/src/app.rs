@@ -12,6 +12,7 @@ use crate::data::{
     self, CairnData, CairnLogs, DataError, ProgressDetail, Project, ProjectGraph, RunProgress,
     Snapshot,
 };
+use crate::form::{FormState, LAST_ROW};
 use crate::graph::{self, Layout};
 
 /// The spinner cadence: ten frames, roughly one revolution per second. The frame only
@@ -32,8 +33,52 @@ pub const CAIRN_LEGEND_ROWS: u16 = 1;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Page {
     Dashboard,
+    Form,
     Cairn,
     Detail,
+}
+
+/// A submit's outcome, carried back from the worker so the UI thread never blocks on the
+/// CLI. `Started` carries the line to report, `Failed` the CLI's own error text.
+pub enum SubmitOutcome {
+    Started(String),
+    Failed(String),
+}
+
+/// How a status line reads: an in-progress note, a success, or a failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MessageKind {
+    Info,
+    Ok,
+    Err,
+}
+
+/// The dashboard's one status line, the Ink app's `message`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Message {
+    pub text: String,
+    pub kind: MessageKind,
+}
+
+impl Message {
+    pub fn info(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            kind: MessageKind::Info,
+        }
+    }
+    pub fn ok(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            kind: MessageKind::Ok,
+        }
+    }
+    pub fn err(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            kind: MessageKind::Err,
+        }
+    }
 }
 
 /// On the dashboard, what `enter` acts on. `tab` toggles it, as the Ink list view does.
@@ -116,6 +161,11 @@ pub struct App {
     cpu_history: Vec<u64>,
     history_dir: String,
 
+    // --- the new-engagement form ----------------------------------------------------
+    form: FormState,
+    submit_rx: Option<Receiver<SubmitOutcome>>,
+    message: Option<Message>,
+
     // --- the Cairn page -------------------------------------------------------------
     page: Page,
     target: Target,
@@ -176,6 +226,9 @@ impl App {
             proc_rss: HashMap::new(),
             cpu_history: Vec::new(),
             history_dir: String::new(),
+            form: FormState::blank(),
+            submit_rx: None,
+            message: None,
             page: Page::Dashboard,
             target: Target::Run,
             cairn_pane: CairnPane::Graph,
@@ -272,6 +325,25 @@ impl App {
 
     pub fn interval_secs(&self) -> u64 {
         self.interval.as_secs().max(1)
+    }
+
+    pub fn form(&self) -> &FormState {
+        &self.form
+    }
+
+    pub fn message(&self) -> Option<&Message> {
+        self.message.as_ref()
+    }
+
+    /// The footer needs a second row on the dashboard while a submit status line is showing,
+    /// the way the Ink footer stacks `message` above its key line. Every other page is one
+    /// line.
+    pub fn footer_height(&self) -> u16 {
+        if self.page == Page::Dashboard && self.message.is_some() {
+            2
+        } else {
+            1
+        }
     }
 
     pub fn selected(&self) -> usize {
@@ -962,14 +1034,167 @@ impl App {
             self.should_quit = true;
             return;
         }
-        if key.code == KeyCode::Char('q') {
+        // `q` quits from every page except the form, where it is text for the focused field.
+        if key.code == KeyCode::Char('q') && self.page != Page::Form {
             self.should_quit = true;
             return;
         }
         match self.page {
             Page::Cairn => self.on_key_cairn(key),
             Page::Detail => self.on_key_detail(key),
+            Page::Form => self.on_key_form(key),
             Page::Dashboard => self.on_key_dashboard(key),
+        }
+    }
+
+    /// The form's keys, mirroring the Ink `Form` handler: arrows/tab move focus, arrows and
+    /// space toggle the flow and mode, enter submits, esc cancels, and a focused text field
+    /// takes typed characters and backspace. No dashboard key is reachable from here.
+    fn on_key_form(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => {
+                self.close_form();
+                return;
+            }
+            KeyCode::Enter => {
+                self.submit_form();
+                return;
+            }
+            KeyCode::Up => {
+                self.form.row = self.form.row.saturating_sub(1);
+                return;
+            }
+            KeyCode::Down => {
+                self.form.row = (self.form.row + 1).min(LAST_ROW);
+                return;
+            }
+            KeyCode::Tab => {
+                self.form.row = (self.form.row + 1) % (LAST_ROW + 1);
+                return;
+            }
+            KeyCode::BackTab => {
+                self.form.row = (self.form.row + LAST_ROW) % (LAST_ROW + 1);
+                return;
+            }
+            KeyCode::Left => {
+                self.form_toggle(false);
+                return;
+            }
+            KeyCode::Right => {
+                self.form_toggle(true);
+                return;
+            }
+            _ => {}
+        }
+
+        match self.form.row {
+            0 => {
+                if key.code == KeyCode::Char(' ') {
+                    self.form.toggle_flow();
+                }
+            }
+            4 => {
+                if key.code == KeyCode::Char(' ') {
+                    self.form.cycle_mode(true);
+                }
+            }
+            1..=3 => {
+                if matches!(key.code, KeyCode::Backspace | KeyCode::Delete) {
+                    self.form.backspace();
+                } else if let KeyCode::Char(text) = key.code {
+                    // A plain character edits the field; a control/alt chord is not text.
+                    let chord = key.modifiers.intersects(
+                        KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER,
+                    );
+                    if !chord {
+                        self.form.append(&text.to_string());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// `←`/`→` on row 0 toggles the flow; on row 4 they step the mode; elsewhere they do
+    /// nothing, as the Ink handler has it.
+    fn form_toggle(&mut self, forward: bool) {
+        match self.form.row {
+            0 => self.form.toggle_flow(),
+            4 => self.form.cycle_mode(forward),
+            _ => {}
+        }
+    }
+
+    /// Open the form blank, focused on `target` (row 1), exactly as the Ink `n` handler
+    /// does. The dashboard keys are unreachable until it closes.
+    fn open_form(&mut self) {
+        self.form = FormState::blank();
+        self.form.row = 1;
+        self.page = Page::Form;
+    }
+
+    /// `esc`: back to the dashboard unchanged. The form state is discarded on the next open.
+    fn close_form(&mut self) {
+        self.form.error = None;
+        self.page = Page::Dashboard;
+    }
+
+    /// Validate, then hand the argv to a worker so a slow CLI cannot freeze the keys. The
+    /// dashboard reports the outcome through `message` and refetches the run list.
+    fn submit_form(&mut self) {
+        if !self.form.check() {
+            // The error line is shown in the form; nothing is launched.
+            return;
+        }
+        let fields = self.form.engagement();
+        self.page = Page::Dashboard;
+        self.message = Some(Message::info(match fields.flow {
+            crate::form::Flow::Scan => "starting scan…",
+            crate::form::Flow::Engage => "starting engagement…",
+        }));
+        let flow = fields.flow;
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            let outcome = match flow {
+                crate::form::Flow::Scan => match data::start_scan(&fields) {
+                    Ok(line) => SubmitOutcome::Started(line),
+                    Err(error) => SubmitOutcome::Failed(error.to_string()),
+                },
+                crate::form::Flow::Engage => match data::start_engage(&fields) {
+                    Ok(log) => SubmitOutcome::Started(format!(
+                        "engagement started (full flow); log: {log}"
+                    )),
+                    Err(error) => SubmitOutcome::Failed(error.to_string()),
+                },
+            };
+            let _ = tx.send(outcome);
+        });
+        self.submit_rx = Some(rx);
+    }
+
+    /// Collect a finished submit. Returns whether anything changed on screen. A success or
+    /// failure both refresh the list, so a newly started run shows up on the next frame.
+    pub fn pump_submit(&mut self) -> bool {
+        let Some(rx) = &self.submit_rx else {
+            return false;
+        };
+        match rx.try_recv() {
+            Ok(outcome) => {
+                self.submit_rx = None;
+                self.message = Some(match outcome {
+                    SubmitOutcome::Started(text) => Message::ok(text),
+                    SubmitOutcome::Failed(text) => Message::err(text),
+                });
+                self.next_poll = Instant::now();
+                self.start_poll_if_due(Instant::now());
+                true
+            }
+            Err(TryRecvError::Empty) => false,
+            Err(TryRecvError::Disconnected) => {
+                self.submit_rx = None;
+                self.message = Some(Message::err("the submit stopped unexpectedly"));
+                true
+            }
         }
     }
 
@@ -1133,6 +1358,7 @@ impl App {
 
     fn on_key_dashboard(&mut self, key: KeyEvent) {
         match key.code {
+            KeyCode::Char('n') => self.open_form(),
             KeyCode::Up | KeyCode::Char('k') => self.select(-1),
             KeyCode::Down | KeyCode::Char('j') => self.select(1),
             KeyCode::Tab => {

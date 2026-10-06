@@ -17,6 +17,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
 
+use crate::form::{self, NewEngagement};
+
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(20);
 const DEFAULT_PYTHON: &str = "python3";
 const DEFAULT_SCRIPT: &str = "triad.py";
@@ -246,6 +248,7 @@ pub enum DataError {
     },
     Read(io::Error),
     Json(serde_json::Error),
+    Io(io::Error),
 }
 
 impl fmt::Display for DataError {
@@ -266,6 +269,9 @@ impl fmt::Display for DataError {
             }
             DataError::Read(source) => write!(f, "reading the CLI's output failed: {source}"),
             DataError::Json(source) => write!(f, "the CLI returned invalid JSON: {source}"),
+            DataError::Io(source) => {
+                write!(f, "preparing the engagement directory failed: {source}")
+            }
         }
     }
 }
@@ -374,6 +380,72 @@ pub fn fetch_snapshot() -> Result<Snapshot, DataError> {
     let args = vec![script, "runs".to_string(), "--json".to_string()];
     let out = run_command(&python, &args, DEFAULT_TIMEOUT)?;
     serde_json::from_str(&out).map_err(DataError::Json)
+}
+
+// --- starting a new engagement ------------------------------------------------------
+
+/// `triad scan --target ... --workdir ... --mode ...`, mirroring the Ink `startScan`.
+/// `triad scan` returns as soon as Strix is launched, so this resolves with its
+/// `strix started pid=...` line once the directory and pid file are on disk. The engagement
+/// directory is created first, as the Ink path does, so the CLI has somewhere to write.
+pub fn start_scan(fields: &NewEngagement) -> Result<String, DataError> {
+    let dir = form::engagement_workdir(fields);
+    std::fs::create_dir_all(&dir).map_err(DataError::Io)?;
+    let (python, script) = cli();
+    let mut args = vec![script];
+    args.extend(form::scan_args(fields));
+    let out = run_command(&python, &args, DEFAULT_TIMEOUT)?;
+    let line = out
+        .lines()
+        .map(str::trim)
+        .find(|line| line.starts_with("strix started"));
+    Ok(line.map(str::to_string).unwrap_or_else(|| {
+        out.trim()
+            .lines()
+            .rev()
+            .find(|line| !line.trim().is_empty())
+            .map(|line| line.trim().to_string())
+            .unwrap_or_else(|| "scan launched".to_string())
+    }))
+}
+
+/// `triad engage ...`, spawned detached with its output appended to `triad-engage.log`, so
+/// the full flow (which runs for the whole engagement) outlives the dashboard. Mirrors the
+/// Ink `startEngage`; the returned path is the log the dashboard reports. A new process
+/// group detaches it from the dashboard's terminal, so closing the dashboard does not hang
+/// the engagement up.
+pub fn start_engage(fields: &NewEngagement) -> Result<String, DataError> {
+    let dir = form::engagement_workdir(fields);
+    std::fs::create_dir_all(&dir).map_err(DataError::Io)?;
+    let log = dir.join("triad-engage.log");
+    let out_file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log)
+        .map_err(DataError::Io)?;
+    let err_file = out_file.try_clone().map_err(DataError::Io)?;
+
+    let (python, script) = cli();
+    let mut args = vec![script];
+    args.extend(form::engage_args(fields));
+    let mut command = Command::new(&python);
+    command
+        .args(&args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(out_file))
+        .stderr(Stdio::from(err_file));
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    command.spawn().map_err(|source| DataError::Spawn {
+        cmd: format_command(&python, &args),
+        source,
+    })?;
+    // The child is deliberately not waited on or reaped: it is detached, and the dashboard
+    // must not hold its lifetime.
+    Ok(log.to_string_lossy().into_owned())
 }
 
 // --- the Cairn page's two payloads ------------------------------------------------

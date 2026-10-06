@@ -4,6 +4,7 @@
 
 mod app;
 mod data;
+mod form;
 mod graph;
 mod signals;
 mod strix;
@@ -62,6 +63,7 @@ fn run(terminal: &mut Tui, interval: Duration) -> io::Result<()> {
         redraw |= app.pump(now);
         redraw |= app.pump_cairn(now);
         redraw |= app.pump_detail(now);
+        redraw |= app.pump_submit();
         redraw |= app.tick(now);
 
         // The wait is bounded by the next timer, so an idle dashboard sleeps and a busy
