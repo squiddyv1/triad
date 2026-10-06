@@ -915,7 +915,7 @@ function App({interval}: {interval: number}) {
           {animatingCount > 0 ? (
             <>
               <Spinner frame={frame} color="cyan" />
-              <Text bold color={frame % 2 ? 'white' : 'cyan'}> TRIAD</Text>
+              <Text bold color="cyan"> TRIAD</Text>
               <Text dimColor> scanning · {liveCount} live</Text>
             </>
           ) : (
