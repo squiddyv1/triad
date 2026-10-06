@@ -28,10 +28,11 @@ git clone https://github.com/squiddyv1/triad.git && cd triad
 ```
 
 The installer handles its own dependencies, using the command each project publishes:
-`uv`, opencode, Docker and Strix. It then clones Cairn, applies the one patch this repo
-ships, and puts a `triad` wrapper in `~/.local/bin`. `./install.sh --help` lists the
-flags, and `--check` reports what is installed without changing anything. Hermes is only
-installed if you ask for it with `--with-hermes`.
+`uv`, opencode, Docker, Strix and (for the dashboard) Node.js. It then clones Cairn,
+applies the one patch this repo ships, and puts a `triad` wrapper in `~/.local/bin`.
+`./install.sh --help` lists the flags, and `--check` reports what is installed without
+changing anything. The dashboard and its Node runtime install by default; `--no-tui`
+skips both. Hermes is only installed if you ask for it with `--with-hermes`.
 
 If it added you to the `docker` group, that only applies to new logins: run `newgrp docker`
 or log out and back in before going further.
@@ -116,8 +117,10 @@ and its graph, `p` pauses or resumes it, `s` stops it, `d` deletes it after aski
 feeds the run into its project again. A scan whose process is gone reads `stale` rather
 than `running`, because run.json keeps saying running after a kill.
 
-It needs Node 18 or newer, and `./install.sh` installs its dependencies unless you pass
-`--no-tui`. Nothing in the flow depends on it.
+The installer sets up Node 18 or newer and the dashboard's dependencies by default, so
+`triad tui` works after a fresh install; `--no-tui` skips both. A dashboard install that
+fails is reported but does not stop the rest of the install, so the CLI still works
+without it.
 
 ## What is in the repo
 

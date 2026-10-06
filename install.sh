@@ -1,21 +1,21 @@
 #!/usr/bin/env bash
 #
 # Triad installer: the prerequisites (uv, Docker, a worker CLI) plus Strix and
-# Cairn. The normal flow is Strix -> Cairn and needs no agent framework; Hermes is
-# an optional extra layer and is never installed unless you ask for it.
+# Cairn; the dashboard and its Node runtime install by default. The normal flow is
+# Strix -> Cairn and needs no agent framework. Hermes is opt-in, never automatic.
 #
 #   ./install.sh                 install everything the flow needs
 #   ./install.sh --with-hermes   also install Hermes if it is missing
 #   ./install.sh --no-docker     never install Docker, only report it
 #   ./install.sh --no-uv         never install uv, only report it
 #   ./install.sh --no-worker     never install a worker CLI, only report it
-#   ./install.sh --no-tui        never install the dashboard's node modules
+#   ./install.sh --no-tui        never install Node or the dashboard, only report
 #   ./install.sh --detect-only   report what is present, install nothing
 #   ./install.sh --check         verify an existing install, change nothing
 #   ./install.sh --uninstall     remove the symlinks this script created
 #
-# Env vars, install methods and the layer table are in README.md.
-# Every path is overridable, so nothing here is machine-specific.
+# Env vars, install methods and the layer table are in README.md; NODE_DIR and
+# NODE_INSTALL_METHOD override Node, like every other path and method here.
 
 set -euo pipefail
 
@@ -24,6 +24,8 @@ CAIRN_DIR="${CAIRN_DIR:-$TRIAD_HOME/cairn}"
 HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
 BIN_DIR="${BIN_DIR:-$HOME/.local/bin}"
 ENGAGEMENTS="${ENGAGEMENTS:-$HOME/engagements}"
+NODE_DIR="${NODE_DIR:-$HOME/.local/opt/node}"
+NODE_MIN_MAJOR=18
 
 CAIRN_REPO="${CAIRN_REPO:-https://github.com/oritera/Cairn.git}"
 PATCH="$TRIAD_HOME/patches/0001-opencode-worker-backend.patch"
@@ -43,6 +45,9 @@ UV_INSTALL_URL="${UV_INSTALL_URL:-https://astral.sh/uv/install.sh}"
 # repo adds to Cairn, and the one that works on arm64 and a free tier.
 WORKER_INSTALL_URL="${WORKER_INSTALL_URL:-https://opencode.ai/install}"
 WORKER_NAMES="opencode claude codex pi"
+# Node, for the dashboard: the official prebuilt tarball, so no root or distro package.
+NODE_INDEX_URL="${NODE_INDEX_URL:-https://nodejs.org/dist/index.json}"
+NODE_DIST_URL="${NODE_DIST_URL:-https://nodejs.org/dist}"
 
 MODE="install"
 # Installing the missing layers is the default; --detect-only turns it off.
@@ -52,7 +57,8 @@ WITH_HERMES=0
 # Docker is installed by default, because Strix's sandbox and Cairn's container
 # mode both need it; --no-docker (or DOCKER_INSTALL_METHOD=none) opts out.
 DOCKER_INSTALL_METHOD="${DOCKER_INSTALL_METHOD:-}"
-# The dashboard's node modules: installed when node is there, skipped on request.
+# Node and the dashboard's dependencies: both installed by default, each skippable.
+NODE_INSTALL_METHOD="${NODE_INSTALL_METHOD:-}"
 TUI_INSTALL_METHOD="${TUI_INSTALL_METHOD:-}"
 for arg in "$@"; do
   case "$arg" in
@@ -67,6 +73,7 @@ for arg in "$@"; do
     --no-worker)
                     WORKER_INSTALL_METHOD="none" ;;
     --no-tui)
+                    NODE_INSTALL_METHOD="none"
                     TUI_INSTALL_METHOD="none" ;;
     --with-hermes|--all)
                     WITH_HERMES=1 ;;
@@ -101,7 +108,7 @@ uv_bin_path() {
 # yet (they tell you to `source ~/.bashrc`). Pick them up immediately.
 refresh_path() {
   local d
-  for d in "$HOME/.local/bin" "$HOME/.hermes/bin" "$HOME/.strix/bin" "$HOME/.opencode/bin"; do
+  for d in "$HOME/.local/bin" "$HOME/.hermes/bin" "$HOME/.strix/bin" "$HOME/.opencode/bin" "$NODE_DIR/bin"; do
     [ -d "$d" ] || continue
     case ":$PATH:" in
       *":$d:"*) ;;
@@ -519,6 +526,110 @@ ensure_worker_cli() {
   return 0
 }
 
+# Pure resolution, kept separate from the install so the URLs can be checked without
+# fetching anything. index.json is newest-first, so the first v22 LTS entry wins.
+node_lts_version() {
+  curl -fsSL "$NODE_INDEX_URL" | python3 -c '
+import json, sys
+for e in json.load(sys.stdin):
+    v = e.get("version", "")
+    if v.startswith("v22.") and e.get("lts") not in (False, None):
+        print(v)
+        break
+'
+}
+
+node_arch() {
+  case "$(uname -m)" in
+    x86_64)          echo x64 ;;
+    aarch64|arm64)   echo arm64 ;;
+    *) return 1 ;;
+  esac
+}
+
+node_tarball_url() {  # <version> <arch>
+  printf '%s/%s/node-%s-linux-%s.tar.xz\n' "$NODE_DIST_URL" "$1" "$1" "$2"
+}
+
+node_shasums_url() {  # <version>
+  printf '%s/%s/SHASUMS256.txt\n' "$NODE_DIST_URL" "$1"
+}
+
+node_major() {
+  have node || return 1
+  node --version 2>/dev/null | sed 's/^v//; s/\..*//'
+}
+
+# Node >= 18 is what the dashboard's Ink/tsx stack needs. An older node is not used:
+# it is named in the warning and replaced, rather than silently powering the dashboard.
+ensure_node() {
+  if have node; then
+    local cur
+    cur="$(node_major)"
+    if [ -n "$cur" ] && [ "$cur" -ge "$NODE_MIN_MAJOR" ] 2>/dev/null; then
+      ok "node $(node --version 2>/dev/null) already installed"
+      return 0
+    fi
+    warn "node $(node --version 2>/dev/null) is older than $NODE_MIN_MAJOR; installing a newer one"
+  fi
+  local method="${NODE_INSTALL_METHOD:-$INSTALL_METHOD}"
+  if [ "$method" = "none" ]; then
+    warn "node is missing and installation is disabled ($method)"
+    warn "  install Node $NODE_MIN_MAJOR or newer yourself, then re-run"
+    return 1
+  fi
+  local arch version tar tmp want_sha got_sha
+  arch="$(node_arch)" || {
+    err "unsupported architecture '$(uname -m)'; install Node $NODE_MIN_MAJOR yourself"
+    return 1
+  }
+  echo "  resolving the newest Node 22 LTS from nodejs.org"
+  version="$(node_lts_version)" || { err "could not read $NODE_INDEX_URL"; return 1; }
+  [ -n "$version" ] || { err "no Node 22 LTS in the release index"; return 1; }
+  tar="node-$version-linux-$arch.tar.xz"
+  tmp="$(mktemp -d -t triad-node.XXXXXX)"
+  # One trap for the temp dir only; the move below is what makes a failure non-destructive.
+  if ! curl -fsSL "$(node_tarball_url "$version" "$arch")" -o "$tmp/$tar" \
+     || ! curl -fsSL "$(node_shasums_url "$version")" -o "$tmp/SHASUMS256.txt"; then
+    rm -rf "$tmp"
+    err "could not download $tar; nothing was installed"
+    return 1
+  fi
+  want_sha="$(awk -v f="$tar" '$2==f {print $1}' "$tmp/SHASUMS256.txt")"
+  got_sha="$(sha256sum "$tmp/$tar" | awk '{print $1}')"
+  if [ -z "$want_sha" ] || [ "$want_sha" != "$got_sha" ]; then
+    rm -rf "$tmp"
+    err "sha256 mismatch for $tar; refusing to unpack"
+    return 1
+  fi
+  echo "    verified sha256 $(printf '%s' "$got_sha" | cut -c1-16)..."
+  if ! tar -xJf "$tmp/$tar" -C "$tmp"; then
+    rm -rf "$tmp"
+    err "could not unpack $tar (needs xz)"
+    return 1
+  fi
+  if [ ! -x "$tmp/node-$version-linux-$arch/bin/node" ] \
+     || [ ! -x "$tmp/node-$version-linux-$arch/bin/npm" ]; then
+    rm -rf "$tmp"
+    err "the Node archive did not contain bin/node and bin/npm"
+    return 1
+  fi
+  # Unpack fully first, then swap: a half-downloaded archive never replaces a working Node.
+  mkdir -p "$(dirname "$NODE_DIR")"
+  rm -rf "$NODE_DIR.new"
+  mv "$tmp/node-$version-linux-$arch" "$NODE_DIR.new"
+  rm -rf "$NODE_DIR"
+  mv "$NODE_DIR.new" "$NODE_DIR"
+  rm -rf "$tmp"
+  refresh_path
+  if have node; then
+    ok "node installed ($(node --version 2>/dev/null))"
+  else
+    ok "node installed at $NODE_DIR/bin/node; open a new shell to use it"
+  fi
+  return 0
+}
+
 ensure_tui() {
   local tui="$TRIAD_HOME/tui"
   if [ ! -d "$tui" ]; then
@@ -535,24 +646,32 @@ ensure_tui() {
     return 1
   fi
   refresh_path
-  if ! have node; then
-    warn "node is not installed; the dashboard needs Node 18 or newer"
-    warn "  the CLI does everything the dashboard shows. Install node, then:"
-    warn "  cd $tui && npm install"
-    return 1
-  fi
+  ensure_node || return 1
   if ! have npm; then
     warn "npm is not on PATH; install the dependencies yourself:  cd $tui && npm install"
     return 1
   fi
-  echo "  installing the dashboard's dependencies with npm (ink, react)"
-  if ( cd "$tui" && npm install --silent --no-audit --no-fund >/dev/null 2>&1 ); then
-    ok "dashboard ready:  triad tui"
-    return 0
+  # npm ci is reproducible from the lockfile; fall back only when it fails.
+  local npm_cmd=install
+  if [ -f "$tui/package-lock.json" ]; then npm_cmd=ci; fi
+  echo "  installing the dashboard's dependencies with npm $npm_cmd (ink, react)"
+  if [ "$npm_cmd" = ci ]; then
+    if ! ( cd "$tui" && npm ci --silent --no-audit --no-fund >/dev/null 2>&1 ); then
+      warn "npm ci failed; falling back to npm install"
+      npm_cmd=install
+    fi
   fi
-  warn "npm install failed in $tui; the CLI is unaffected"
-  warn "  try it yourself:  cd $tui && npm install"
-  return 1
+  if [ "$npm_cmd" = install ]; then
+    if ( cd "$tui" && npm install --silent --no-audit --no-fund >/dev/null 2>&1 ); then
+      ok "dashboard ready:  triad tui"
+      return 0
+    fi
+    warn "npm install failed in $tui; the CLI is unaffected"
+    warn "  try it yourself:  cd $tui && npm install"
+    return 1
+  fi
+  ok "dashboard ready:  triad tui"
+  return 0
 }
 
 ensure_strix() {
@@ -629,6 +748,29 @@ else
   warn "no worker CLI; will install opencode (${WORKER_INSTALL_METHOD:-$INSTALL_METHOD})"
 fi
 
+NODE_METHOD="${NODE_INSTALL_METHOD:-$INSTALL_METHOD}"
+NODE_CUR="$(node_major 2>/dev/null || true)"
+if [ -n "$NODE_CUR" ] && [ "$NODE_CUR" -ge "$NODE_MIN_MAJOR" ] 2>/dev/null; then
+  ok "node $(node --version 2>/dev/null) (dashboard)"
+elif [ "$MODE" = "check" ] || [ "$NODE_METHOD" = "none" ]; then
+  warn "node is missing or older than $NODE_MIN_MAJOR; the dashboard needs it"
+else
+  warn "node is missing or older than $NODE_MIN_MAJOR; will install it ($NODE_METHOD)"
+fi
+if [ "$NODE_METHOD" = "none" ]; then
+  warn "node installation is disabled (NODE_INSTALL_METHOD=none)"
+fi
+
+if [ -d "$TRIAD_HOME/tui/node_modules/ink" ]; then
+  ok "dashboard dependencies installed"
+elif [ "${TUI_INSTALL_METHOD:-$INSTALL_METHOD}" = "none" ]; then
+  warn "dashboard dependencies not installed; installation is disabled"
+elif [ "$MODE" = "check" ]; then
+  warn "dashboard dependencies not installed; run ./install.sh to install them"
+else
+  warn "dashboard dependencies not installed; will install them (${TUI_INSTALL_METHOD:-$INSTALL_METHOD})"
+fi
+
 if [ "$MODE" = "check" ]; then
   refresh_path
   if strix_present; then ok "strix present"; else warn "strix not found"; fi
@@ -696,10 +838,12 @@ ensure_docker || warn "docker is not usable; Strix will not run until it is"
 # Strix, the discovery layer: the normal Strix -> Cairn flow depends on it.
 hdr "Strix (discovery layer)"
 ensure_strix   || warn "Strix is not installed; the discovery layer will be unavailable"
-# The dashboard is optional: it renders what the CLI already reports, and nothing
-# in the flow depends on it, so a failure here is a warning rather than a stop.
-hdr "Dashboard (optional)"
-ensure_tui     || warn "the dashboard is unavailable; the CLI is unaffected"
+# The dashboard needs its own Node runtime; the rest of the stack does not.
+hdr "Node (dashboard)"
+ensure_node    || warn "Node is not available; the dashboard cannot be installed"
+# The dashboard installs by default, but a failure here must not stop the stack.
+hdr "Dashboard"
+ensure_tui     || warn "the dashboard could not be installed; the CLI and the stack still work"
 # Hermes: optional, and only touched when asked for. Rather than a no-op flag,
 # this is the one place the control plane gets installed.
 if [ "$WITH_HERMES" = 1 ] && [ "$INSTALL_METHOD" != "none" ]; then

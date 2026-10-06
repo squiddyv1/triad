@@ -698,7 +698,7 @@ def cmd_tui(args):
     tui = _repo_root() / "tui"
     if not (tui / "node_modules" / "ink").is_dir():
         _err("the dashboard's dependencies are not installed yet")
-        print(f"     cd {tui} && npm install")
+        print("     run ./install.sh (it installs Node and the dashboard; --no-tui skips it)")
         return 1
     node = shutil.which("node")
     if not node:
@@ -2351,6 +2351,8 @@ def cmd_home(args):
         _ok(f"dispatcher running (pid {pid}, log {DISPATCH_LOG})")
     else:
         _warn("dispatcher not running (no projects will move without it)")
+    if (_repo_root() / "tui" / "node_modules" / "ink").is_dir():
+        _ok("dashboard ready (triad tui)")
     if not _cairn_up() or pid is None:
         print("  Start the stack:  triad up")
     try:

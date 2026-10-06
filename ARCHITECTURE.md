@@ -6,9 +6,9 @@ optional orchestration layer on top.
 
 **Dependency shape.** The normal flow is `triad.py` driving Strix, feeding the Cairn
 graph, then reporting. That path imports the `plugin/` package directly and never
-loads Hermes. Hermes supplies the control plane in 2.3, and the codebase treats it
-like a dashboard: useful, optional, absent by default. `install.sh` installs it only
-with `--with-hermes`, and skips the plugin wiring when it is not there.
+loads Hermes. Hermes supplies the control plane in 2.3 and is opt-in: `install.sh`
+installs it only with `--with-hermes`, and skips the plugin wiring when it is not there.
+The dashboard is installed by default; see 4.7.
 
 Everything below was verified against the actual software: Cairn was cloned and its
 server run locally, its REST lifecycle exercised end to end, Strix's installed CLI
@@ -241,10 +241,12 @@ script tracks).
 
 Every path is overridable, so nothing is machine-specific: `TRIAD_HOME` (the script's own
 directory), `CAIRN_DIR` (`$TRIAD_HOME/cairn`), `HERMES_HOME` (`~/.hermes`), `BIN_DIR`
-(`~/.local/bin`), `ENGAGEMENTS` (`~/engagements`), plus `UV_INSTALL_METHOD` and
-`DOCKER_INSTALL_METHOD` to downgrade either to a report.
+(`~/.local/bin`), `ENGAGEMENTS` (`~/engagements`), `NODE_DIR` (`~/.local/opt/node`), plus
+`UV_INSTALL_METHOD`, `DOCKER_INSTALL_METHOD`, `WORKER_INSTALL_METHOD`,
+`NODE_INSTALL_METHOD` and `TUI_INSTALL_METHOD` to downgrade any layer to a report.
 
-Docker and uv are installed when missing, since Cairn needs both. That needed care on
+Docker and uv are installed when missing, since Cairn needs both, and Node is installed
+for the dashboard. That needed care on derivatives:
 derivatives: Kali, Parrot, Mint and Pop are not distros Docker publishes packages for, so
 `get.docker.com` takes its `*)` branch, maps the distro to `debian` while keeping
 `VERSION_ID`, and writes a source for a suite that does not exist
@@ -322,6 +324,12 @@ Two details the UI depends on and the CLI provides: a launch records its pid in
 fallback, so scans started before that or by another tool are still controllable), and a
 feed writes the project id into `<workdir>/.triad-project`, which is what pairs a run with
 its graph.
+
+`install.sh` installs Node 18 or newer from the official prebuilt tarball (no root, no
+distro package) and the app's dependencies by default, so `triad tui` works after a fresh
+install; `--no-tui` skips both, and `NODE_INSTALL_METHOD` / `TUI_INSTALL_METHOD` downgrade
+either to a report. A dashboard install that fails is reported as a failed step but never
+blocks the rest of the install, so the CLI keeps working without it.
 
 ### 4.8 Not built yet
 
