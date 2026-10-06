@@ -171,9 +171,11 @@ function Row({run, selected, frame}: {run: RunProgress; selected: boolean; frame
   return (
     <Box>
       <Text color={selected ? 'cyan' : undefined}>{selected ? '▸ ' : '  '}</Text>
-      {run.live || run.paused
+      {run.live && !run.paused
         ? <><Spinner frame={frame} color={colour} /><Text color={colour}> </Text></>
-        : <Text color={colour}>○ </Text>}
+        : run.paused
+          ? <Text color={colour}>‖ </Text>
+          : <Text color={colour}>○ </Text>}
       <Text bold={selected} color={selected ? 'white' : undefined}>
         {fit(run.run, 23)}
       </Text>
@@ -357,7 +359,9 @@ function buildHeader(d: ProgressDetail, width: number, findingsShown: number, ga
     ? d.coverage.summary as {surfaces_reviewed?: number; findings_filed?: number; gaps?: number}
     : {};
   const gaps = Array.isArray(d.coverage?.gaps) ? d.coverage.gaps : [];
-  const gapCount = typeof summary.gaps === 'number' ? summary.gaps : gaps.length;
+  // The count follows the list the pane renders: when the run supplied gaps, use their
+  // length, so a header can never say more gaps than it shows.
+  const gapCount = gaps.length || (typeof summary.gaps === 'number' ? summary.gaps : 0);
   push([
     {text: ' coverage '},
     {text: `${summary.surfaces_reviewed ?? 0} surfaces reviewed · ${summary.findings_filed ?? 0} filed · `},
@@ -509,16 +513,18 @@ function App({interval}: {interval: number}) {
   }, [mode, detailTarget, loadDetail, interval]);
 
   const runs = snapshot?.runs ?? [];
-  const liveRuns = runs.filter(r => r.live || r.paused);
-  const liveCount = liveRuns.length;
+  const liveCount = runs.filter(r => r.live || r.paused).length;
+  // Only a scan that is actually running animates. A paused one is still "live" on disk,
+  // and ticking it would read as work that is not happening.
+  const animatingCount = runs.filter(r => r.live && !r.paused).length;
 
-  // The ticker only exists while something is live: no live runs means no timer, no
-  // re-renders, and a dashboard that costs nothing when idle.
+  // The ticker only exists while something is animating: nothing animating means no
+  // timer, no re-renders, and a dashboard that costs nothing when idle.
   useEffect(() => {
-    if (liveCount === 0) return undefined;
+    if (animatingCount === 0) return undefined;
     const timer = setInterval(() => setFrame(f => f + 1), 120);
     return () => clearInterval(timer);
-  }, [liveCount]);
+  }, [animatingCount]);
 
   const index = Math.min(selected, Math.max(0, runs.length - 1));
   const run = runs[index] ?? null;
@@ -557,6 +563,7 @@ function App({interval}: {interval: number}) {
     ? runs.find(r => r.workdir === detailTarget.workdir && r.run === detailTarget.run) ?? null
     : null;
   const detailLive = Boolean(detailRun?.live || detailRun?.paused);
+  const detailPaused = Boolean(detailRun?.paused);
   const currentText = detail?.agents.running?.[0]
     ?? detail?.todos_detail?.find(t => t.status === 'in_progress')?.title
     ?? 'working';
@@ -808,7 +815,7 @@ function App({interval}: {interval: number}) {
     <Box flexDirection="column" height={rows - 1}>
       <Box justifyContent="space-between">
         <Box>
-          {liveCount > 0 ? (
+          {animatingCount > 0 ? (
             <>
               <Spinner frame={frame} color="cyan" />
               <Text bold color={frame % 2 ? 'white' : 'cyan'}> TRIAD</Text>
@@ -852,9 +859,11 @@ function App({interval}: {interval: number}) {
                 <>
                   {detailLive && (
                     <Box>
-                      <Spinner frame={frame} color="cyan" />
-                      <Text dimColor> scanning  </Text>
-                      <Text color="cyan">{currentText}</Text>
+                      {detailPaused
+                        ? <Text color={STATE_COLOUR.paused}>‖ </Text>
+                        : <Spinner frame={frame} color="cyan" />}
+                      <Text dimColor> {detailPaused ? 'paused' : 'scanning'}  </Text>
+                      <Text color={detailPaused ? STATE_COLOUR.paused : 'cyan'}>{currentText}</Text>
                     </Box>
                   )}
                   {shownHeader.map((line, i) => <LineView key={`h${i}`} line={line} />)}

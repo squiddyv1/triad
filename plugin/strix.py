@@ -202,13 +202,14 @@ def _read_json(path, default):
         return default
 
 
-def run_progress(cwd, run_name=None) -> dict:
+def run_progress(cwd, run_name=None, _run=None) -> dict:
     """How far along a run is: agents, todos, notes and usage, from Strix's own state.
 
     These are the files Strix's viewer reads, so this is the terminal equivalent and it
-    works while the scan is still writing them.
+    works while the scan is still writing them. `_run` lets a caller that already read the
+    run hand that result in, so the SARIF is not parsed twice for one detail response.
     """
-    run = read_run(cwd, run_name)
+    run = _run if _run is not None else read_run(cwd, run_name)
     run_dir = Path(run["run_dir"])
     meta = _read_json(run_dir / "run.json", {})
     usage = meta.get("llm_usage") or {}
@@ -366,7 +367,8 @@ def run_progress_detail(cwd, run_name=None, log_lines=200, messages=200) -> dict
     The summary keys keep their order and shape; every extra key is appended, so callers
     polling the plain summary see no change.
     """
-    out = run_progress(cwd, run_name)
+    run = read_run(cwd, run_name)
+    out = run_progress(cwd, run_name, run)
     run_dir = Path(out["dir"])
     state = run_dir / ".state"
 
@@ -412,14 +414,19 @@ def run_progress_detail(cwd, run_name=None, log_lines=200, messages=200) -> dict
         for f in (vulns if isinstance(vulns, list) else [])
     ]
 
-    # Coverage is split across two files: the summary is Strix's own, the gaps land in
-    # run.json. Report the key only when at least one half exists.
+    # Coverage is split across files: the summary is Strix's own, and the gaps come from
+    # run.json when it carries a list, else fall back to the SARIF-derived list read_run
+    # already built -- the same list the summary count (`coverage_gaps`) is taken from, so
+    # the count and this list cannot disagree. Report the key only when there is something.
     coverage = {}
     cov = _read_json(run_dir / "coverage.json", {})
     if isinstance(cov, dict) and cov.get("summary"):
         coverage["summary"] = cov["summary"]
-    if "coverage_gaps" in meta and isinstance(meta["coverage_gaps"], list):
-        coverage["gaps"] = meta["coverage_gaps"]
+    gaps = meta.get("coverage_gaps")
+    if not isinstance(gaps, list):
+        gaps = run["coverage_gaps"]
+    if gaps:
+        coverage["gaps"] = gaps
     if coverage:
         out["coverage"] = coverage
 
