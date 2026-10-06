@@ -88,6 +88,17 @@ pub enum Target {
     Cairn,
 }
 
+/// The four artifact files the run-detail pane reports, plus the finding count when the
+/// vulnerabilities file parses. Re-checked once per poll, like the Ink `useMemo`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Artifacts {
+    pub report: bool,
+    pub vulns: bool,
+    pub vulns_count: Option<usize>,
+    pub sarif: bool,
+    pub coverage: bool,
+}
+
 /// Which half of the Cairn page the scroll keys act on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CairnPane {
@@ -166,6 +177,12 @@ pub struct App {
     submit_rx: Option<Receiver<SubmitOutcome>>,
     message: Option<Message>,
 
+    // --- stack control (`u`/`x`) and the collapsed lists (`c`) ----------------------
+    pending_stack_down: bool,
+    stack_rx: Option<Receiver<SubmitOutcome>>,
+    lists_collapsed: bool,
+    artifacts: Artifacts,
+
     // --- the Cairn page -------------------------------------------------------------
     page: Page,
     target: Target,
@@ -229,6 +246,10 @@ impl App {
             form: FormState::blank(),
             submit_rx: None,
             message: None,
+            pending_stack_down: false,
+            stack_rx: None,
+            lists_collapsed: false,
+            artifacts: Artifacts::default(),
             page: Page::Dashboard,
             target: Target::Run,
             cairn_pane: CairnPane::Graph,
@@ -335,11 +356,27 @@ impl App {
         self.message.as_ref()
     }
 
-    /// The footer needs a second row on the dashboard while a submit status line is showing,
-    /// the way the Ink footer stacks `message` above its key line. Every other page is one
-    /// line.
+    /// The selected run's artifact presence, as of the last poll.
+    pub fn artifacts(&self) -> &Artifacts {
+        &self.artifacts
+    }
+
+    /// Whether `c` has collapsed RUNS and PROJECTS to headers.
+    pub fn lists_collapsed(&self) -> bool {
+        self.lists_collapsed
+    }
+
+    /// Whether `x` is waiting on a `y`/`n`, the Ink `pendingStackDown`.
+    pub fn pending_stack_down(&self) -> bool {
+        self.pending_stack_down
+    }
+
+    /// The footer needs a second row while a status line or the stack confirmation is
+    /// showing, the way the Ink footer stacks `message` above its key line. Every other
+    /// page is one line.
     pub fn footer_height(&self) -> u16 {
-        if self.page == Page::Dashboard && self.message.is_some() {
+        let status = self.message.is_some() || self.pending_stack_down;
+        if self.page != Page::Form && status {
             2
         } else {
             1
@@ -1198,9 +1235,89 @@ impl App {
         }
     }
 
+    // --- driving the stack (`u`/`x`) -------------------------------------------------
+
+    /// `u`: start the stack. No confirmation, because it only brings containers up.
+    fn start_stack_up(&mut self) {
+        self.begin_stack(data::StackAction::Up);
+    }
+
+    /// `x`: arm the confirmation. Nothing runs until `y`.
+    fn request_stack_down(&mut self) {
+        self.pending_stack_down = true;
+    }
+
+    /// The Ink `confirmStackDown`: while the confirmation is armed it owns every key, so
+    /// the `down` can never be half-answered. Returns whether the key was consumed.
+    fn confirm_stack_down(&mut self, key: KeyEvent) -> bool {
+        if !self.pending_stack_down {
+            return false;
+        }
+        match key.code {
+            KeyCode::Char('y') => {
+                self.pending_stack_down = false;
+                self.begin_stack(data::StackAction::Down);
+            }
+            KeyCode::Char('n') | KeyCode::Esc => {
+                self.pending_stack_down = false;
+                self.message = Some(Message::info("stop cancelled"));
+            }
+            _ => {}
+        }
+        true
+    }
+
+    /// Hand `triad up`/`triad down` to a worker so a slow Docker call cannot freeze the
+    /// keys. The outcome is reported through the same `message` line every action uses.
+    fn begin_stack(&mut self, action: data::StackAction) {
+        self.message = Some(Message::info(match action {
+            data::StackAction::Up => "starting the stack…",
+            data::StackAction::Down => "stopping the stack…",
+        }));
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            let outcome = match data::run_stack(action) {
+                Ok(out) => SubmitOutcome::Started(stack_summary(&out)),
+                Err(error) => SubmitOutcome::Failed(error.to_string()),
+            };
+            let _ = tx.send(outcome);
+        });
+        self.stack_rx = Some(rx);
+    }
+
+    /// Collect a finished stack command. Returns whether anything changed on screen. The
+    /// list is refreshed so the next poll picks up the new Cairn state in the header.
+    pub fn pump_stack(&mut self) -> bool {
+        let Some(rx) = &self.stack_rx else {
+            return false;
+        };
+        match rx.try_recv() {
+            Ok(outcome) => {
+                self.stack_rx = None;
+                self.message = Some(match outcome {
+                    SubmitOutcome::Started(text) => Message::ok(text),
+                    SubmitOutcome::Failed(text) => Message::err(text),
+                });
+                self.next_poll = Instant::now();
+                self.start_poll_if_due(Instant::now());
+                true
+            }
+            Err(TryRecvError::Empty) => false,
+            Err(TryRecvError::Disconnected) => {
+                self.stack_rx = None;
+                self.message = Some(Message::err("the stack command stopped unexpectedly"));
+                true
+            }
+        }
+    }
+
     /// The Cairn page's keys, mirroring the Ink modal: esc/enter close, tab switches
     /// panes, arrows and PgUp/PgDn scroll the focused one, g/G jump, r refetches.
     fn on_key_cairn(&mut self, key: KeyEvent) {
+        // The stack confirmation owns every key while it is armed, as the Ink handler does.
+        if self.confirm_stack_down(key) {
+            return;
+        }
         if matches!(key.code, KeyCode::Esc | KeyCode::Enter) {
             self.close_cairn();
             return;
@@ -1214,6 +1331,18 @@ impl App {
         }
         if key.code == KeyCode::Char('r') {
             self.refetch_cairn();
+            return;
+        }
+        if key.code == KeyCode::Char('c') {
+            self.lists_collapsed = !self.lists_collapsed;
+            return;
+        }
+        if key.code == KeyCode::Char('u') {
+            self.start_stack_up();
+            return;
+        }
+        if key.code == KeyCode::Char('x') {
+            self.request_stack_down();
             return;
         }
 
@@ -1284,6 +1413,10 @@ impl App {
     /// The Strix modal's keys, mirroring the Ink verbose view: esc/enter close, tab
     /// switches panes, arrows and PgUp/PgDn scroll the focused one, g/G jump, r refetches.
     fn on_key_detail(&mut self, key: KeyEvent) {
+        // The stack confirmation owns every key while it is armed, as the Ink handler does.
+        if self.confirm_stack_down(key) {
+            return;
+        }
         if matches!(key.code, KeyCode::Esc | KeyCode::Enter) {
             self.close_detail();
             return;
@@ -1297,6 +1430,18 @@ impl App {
         }
         if key.code == KeyCode::Char('r') {
             self.refetch_detail();
+            return;
+        }
+        if key.code == KeyCode::Char('c') {
+            self.lists_collapsed = !self.lists_collapsed;
+            return;
+        }
+        if key.code == KeyCode::Char('u') {
+            self.start_stack_up();
+            return;
+        }
+        if key.code == KeyCode::Char('x') {
+            self.request_stack_down();
             return;
         }
 
@@ -1357,6 +1502,10 @@ impl App {
     }
 
     fn on_key_dashboard(&mut self, key: KeyEvent) {
+        // The stack confirmation owns every key while it is armed, as the Ink handler does.
+        if self.confirm_stack_down(key) {
+            return;
+        }
         match key.code {
             KeyCode::Char('n') => self.open_form(),
             KeyCode::Up | KeyCode::Char('k') => self.select(-1),
@@ -1376,6 +1525,9 @@ impl App {
                 self.next_poll = Instant::now();
                 self.start_poll_if_due(Instant::now());
             }
+            KeyCode::Char('c') => self.lists_collapsed = !self.lists_collapsed,
+            KeyCode::Char('u') => self.start_stack_up(),
+            KeyCode::Char('x') => self.request_stack_down(),
             _ => {}
         }
     }
@@ -1453,6 +1605,37 @@ impl App {
                 }
             }
         }
+        self.refresh_artifacts();
+    }
+
+    /// Check the four artifact files under the selected run's directories, once per poll.
+    /// Paths and labels match the Ink `artifacts` memo: `report.md` under the engagement
+    /// workdir, the other three under the run directory.
+    fn refresh_artifacts(&mut self) {
+        let (workdir, dir) = match self.selected_run() {
+            Some(run) => (run.workdir.clone(), run.dir.clone()),
+            None => (String::new(), String::new()),
+        };
+        let report =
+            !workdir.is_empty() && std::path::Path::new(&workdir).join("report.md").is_file();
+        let vuln_path = if dir.is_empty() {
+            None
+        } else {
+            Some(std::path::Path::new(&dir).join("vulnerabilities.json"))
+        };
+        let sarif = !dir.is_empty() && std::path::Path::new(&dir).join("findings.sarif").is_file();
+        let coverage =
+            !dir.is_empty() && std::path::Path::new(&dir).join("coverage.json").is_file();
+        self.artifacts = Artifacts {
+            report,
+            vulns: vuln_path.as_ref().is_some_and(|path| path.is_file()),
+            vulns_count: vuln_path
+                .as_deref()
+                .and_then(std::path::Path::to_str)
+                .and_then(data::read_finding_count),
+            sarif,
+            coverage,
+        };
     }
 }
 
@@ -1486,4 +1669,75 @@ fn cpu_percent(now: ProcSample, before: ProcSample) -> Option<f64> {
     }
     let delta = (now.ticks - before.ticks) as f64;
     Some((delta / CLK_TCK / seconds * 100.0).max(0.0))
+}
+
+/// `triad up` ends with a Next block, so prefer the line that says what happened
+/// ("already answering", "dispatcher started", "the containers"); the last non-empty line
+/// is the fallback, as the Ink `stackSummary` does.
+fn stack_summary(out: &str) -> String {
+    let lines: Vec<&str> = out
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    if let Some(line) = lines.iter().find(|line| {
+        line.contains("already answering")
+            || line.contains("dispatcher started")
+            || line.contains("dispatcher is already")
+            || line.contains("the containers")
+            || line.contains("network removed")
+    }) {
+        return line.to_string();
+    }
+    lines
+        .last()
+        .map(|line| line.to_string())
+        .unwrap_or_else(|| "stack updated".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn press(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn c_collapses_and_expands_the_lists() {
+        let mut app = App::new(Duration::from_secs(3));
+        assert!(!app.lists_collapsed());
+        app.on_key(press(KeyCode::Char('c')));
+        assert!(app.lists_collapsed());
+        app.on_key(press(KeyCode::Char('c')));
+        assert!(!app.lists_collapsed());
+    }
+
+    #[test]
+    fn x_asks_before_stopping_and_n_cancels() {
+        let mut app = App::new(Duration::from_secs(3));
+        assert!(!app.pending_stack_down());
+        app.on_key(press(KeyCode::Char('x')));
+        assert!(app.pending_stack_down());
+        // While armed the confirmation owns every key, so the `down` cannot be half-answered.
+        app.on_key(press(KeyCode::Char('j')));
+        assert!(app.pending_stack_down());
+        app.on_key(press(KeyCode::Char('n')));
+        assert!(!app.pending_stack_down());
+        assert_eq!(
+            app.message().map(|message| message.text.as_str()),
+            Some("stop cancelled")
+        );
+    }
+
+    #[test]
+    fn stack_summary_prefers_the_line_that_says_what_happened() {
+        let out = "Starting the stack\ncairn-server is already answering on http://x\ndone\n";
+        assert_eq!(
+            stack_summary(out),
+            "cairn-server is already answering on http://x"
+        );
+        assert_eq!(stack_summary("one\ntwo\n"), "two");
+        assert_eq!(stack_summary(""), "stack updated");
+    }
 }

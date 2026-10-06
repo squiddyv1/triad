@@ -12,6 +12,11 @@ use crate::theme;
 use crate::ui::fit;
 
 pub fn draw(frame: &mut Frame, area: Rect, app: &App) {
+    if app.lists_collapsed() {
+        draw_collapsed(frame, area, app);
+        return;
+    }
+
     let runs = app.runs();
     let projects = app.projects();
 
@@ -32,6 +37,41 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &App) {
 
     draw_runs(frame, runs_area, app, runs);
     draw_projects(frame, projects_area, app, projects);
+}
+
+/// `c` collapses both lists to a header plus count. The RUNS header keeps the selected run
+/// visible, as the Ink collapse does, and the PROJECTS header keeps its count. Both are
+/// bordered header-only blocks, so the right-hand detail pane keeps the same area and never
+/// reflows.
+fn draw_collapsed(frame: &mut Frame, area: Rect, app: &App) {
+    let runs = app.runs();
+    let projects = app.projects();
+    let runs_title = match app.selected_run() {
+        Some(run) => format!("RUNS ({})  ▸ {}", runs.len(), run.run),
+        None => format!("RUNS ({})", runs.len()),
+    };
+    let runs_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(theme::dim())
+        .title(Span::styled(
+            format!(" {} ", fit(&runs_title, 44)),
+            theme::bold().fg(Color::White),
+        ));
+    let projects_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(theme::dim())
+        .title(Span::styled(
+            format!(" PROJECTS ({}) ", projects.len()),
+            theme::bold().fg(Color::White),
+        ));
+    let [runs_area, projects_area, _] = Layout::vertical([
+        Constraint::Length(2),
+        Constraint::Length(2),
+        Constraint::Min(0),
+    ])
+    .areas(area);
+    frame.render_widget(runs_block, runs_area);
+    frame.render_widget(projects_block, projects_area);
 }
 
 fn draw_runs(frame: &mut Frame, area: Rect, app: &App, runs: &[RunProgress]) {

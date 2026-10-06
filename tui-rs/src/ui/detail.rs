@@ -38,14 +38,17 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &App) {
     // flat-zero history was Stage 1's bare `cpu` label over nothing, so both drop the row
     // and the block is one row shorter.
     let telemetry_height: u16 = if app.cpu_signal() { 6 } else { 5 };
-    let fixed = cairn_height + telemetry_height;
+    // Two directory rows, four artifact rows and the border, as the Ink ARTIFACTS block.
+    let artifacts_height: u16 = 8;
+    let fixed = cairn_height + telemetry_height + artifacts_height;
     let strix_height = (strix.len() as u16 + 2)
         .min(area.height.saturating_sub(fixed))
         .max(6);
-    let [strix_area, cairn_area, telemetry_area, _] = Layout::vertical([
+    let [strix_area, cairn_area, telemetry_area, artifacts_area, _] = Layout::vertical([
         Constraint::Length(strix_height),
         Constraint::Length(cairn_height),
         Constraint::Length(telemetry_height),
+        Constraint::Length(artifacts_height),
         Constraint::Min(0),
     ])
     .areas(area);
@@ -53,6 +56,7 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &App) {
     draw_strix(frame, strix_area, strix);
     draw_cairn(frame, cairn_area, run, app);
     draw_telemetry(frame, telemetry_area, app);
+    draw_artifacts(frame, artifacts_area, run, app);
 }
 
 fn draw_error(frame: &mut Frame, area: Rect, error: &str) {
@@ -385,6 +389,51 @@ fn draw_telemetry(frame: &mut Frame, area: Rect, app: &App) {
             .style(Style::new().fg(Color::Cyan)),
         graph_area,
     );
+}
+
+/// The engagement and run directories plus a marked row per artifact, the block the Ink
+/// run-detail pane carries under TELEMETRY. Paths and labels are the Ink ones: `report.md`
+/// under the engagement workdir, the other three under the run directory.
+fn draw_artifacts(frame: &mut Frame, area: Rect, run: &RunProgress, app: &App) {
+    let block = panel("ARTIFACTS");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let artifacts = app.artifacts();
+    let lines = vec![
+        label_line("engagement", vec![Span::raw(data::tilde(&run.workdir))]),
+        label_line("run dir", vec![Span::raw(data::tilde(&run.dir))]),
+        artifact_line("report", artifacts.report, "report.md", None),
+        artifact_line(
+            "vulns",
+            artifacts.vulns,
+            "vulnerabilities.json",
+            if artifacts.vulns {
+                artifacts.vulns_count
+            } else {
+                None
+            },
+        ),
+        artifact_line("sarif", artifacts.sarif, "findings.sarif", None),
+        artifact_line("coverage", artifacts.coverage, "coverage.json", None),
+    ];
+    frame.render_widget(Paragraph::new(elide_lines(lines, inner.width)), inner);
+}
+
+/// A marked artifact row: a green tick when the file is there, a dim cross when it is not,
+/// the file name always dim, exactly the Ink `tick` and label. An optional count trails
+/// when a `vulnerabilities.json` is present and parses.
+fn artifact_line(label: &str, present: bool, name: &str, count: Option<usize>) -> Line<'static> {
+    let tick = if present {
+        Span::styled("✓", Style::new().fg(Color::Green))
+    } else {
+        Span::styled("✗", theme::dim())
+    };
+    let mut spans = vec![tick, Span::styled(format!(" {name}"), theme::dim())];
+    if let Some(count) = count {
+        spans.push(Span::styled(format!("  {count} findings"), theme::dim()));
+    }
+    label_line(label, spans)
 }
 
 fn process_line(label: &str, pid: Option<i64>, app: &App) -> Line<'static> {

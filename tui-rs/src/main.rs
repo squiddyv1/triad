@@ -64,6 +64,7 @@ fn run(terminal: &mut Tui, interval: Duration) -> io::Result<()> {
         redraw |= app.pump_cairn(now);
         redraw |= app.pump_detail(now);
         redraw |= app.pump_submit();
+        redraw |= app.pump_stack();
         redraw |= app.tick(now);
 
         // The wait is bounded by the next timer, so an idle dashboard sleeps and a busy

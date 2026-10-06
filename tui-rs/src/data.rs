@@ -20,6 +20,10 @@ use serde::Deserialize;
 use crate::form::{self, NewEngagement};
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(20);
+/// `triad up` builds and waits for the server and then the dispatcher, so the 20s default
+/// is far too short; both stack verbs still go through the CLI rather than signalling
+/// anything here, exactly as the Ink `control.ts` does.
+const STACK_TIMEOUT: Duration = Duration::from_secs(240);
 const DEFAULT_PYTHON: &str = "python3";
 const DEFAULT_SCRIPT: &str = "triad.py";
 
@@ -380,6 +384,46 @@ pub fn fetch_snapshot() -> Result<Snapshot, DataError> {
     let args = vec![script, "runs".to_string(), "--json".to_string()];
     let out = run_command(&python, &args, DEFAULT_TIMEOUT)?;
     serde_json::from_str(&out).map_err(DataError::Json)
+}
+
+// --- driving the stack --------------------------------------------------------------
+
+/// The two stack verbs the dashboard can run, mirroring `stackUp`/`stackDown` in the Ink
+/// `control.ts`. Both go through the CLI, so the dashboard cannot invent a state change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StackAction {
+    Up,
+    Down,
+}
+
+impl StackAction {
+    pub fn verb(self) -> &'static str {
+        match self {
+            StackAction::Up => "up",
+            StackAction::Down => "down",
+        }
+    }
+}
+
+/// The argv `triad up`/`triad down` is run with, after the interpreter: the script and the
+/// verb. Kept pure and public so the test can assert the exact command without spawning it.
+pub fn stack_args(script: &str, action: StackAction) -> Vec<String> {
+    vec![script.to_string(), action.verb().to_string()]
+}
+
+/// The full command line, `(interpreter, argv)`, that `run_stack` would execute. Exposed
+/// for the same reason the Ink `triadSpawn` returns `{cmd, args}`: the caller (and a test)
+/// can see exactly what would run rather than infer it.
+pub fn stack_command(action: StackAction) -> (String, Vec<String>) {
+    let (python, script) = cli();
+    (python, stack_args(&script, action))
+}
+
+/// Run `triad up` or `triad down` through the CLI. A non-zero exit surfaces the CLI's own
+/// stderr as a `DataError`, so a Docker refusal reads as text rather than a silent no-op.
+pub fn run_stack(action: StackAction) -> Result<String, DataError> {
+    let (python, args) = stack_command(action);
+    run_command(&python, &args, STACK_TIMEOUT)
 }
 
 // --- starting a new engagement ------------------------------------------------------
@@ -805,6 +849,30 @@ pub fn fetch_cairn_logs(lines: usize) -> Result<CairnLogs, DataError> {
     serde_json::from_str(&out).map_err(DataError::Json)
 }
 
+/// Paths in the pane are read, not copied, so the home prefix is noise: collapse it.
+pub fn tilde(path: &str) -> String {
+    match env::var("HOME") {
+        Ok(home) if !home.is_empty() && path.starts_with(&home) => {
+            format!("~{}", &path[home.len()..])
+        }
+        _ => path.to_string(),
+    }
+}
+
+/// Counts the findings a `vulnerabilities.json` carries, or `None` when it is absent or
+/// unreadable. The tick already says the file is there; this only adds the number when it
+/// parses. The three shapes are the ones the Ink `readFindingCount` accepts.
+pub fn read_finding_count(path: &str) -> Option<usize> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let data: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let list = data.as_array().or_else(|| {
+        data.get("vulnerabilities")
+            .and_then(serde_json::Value::as_array)
+            .or_else(|| data.get("findings").and_then(serde_json::Value::as_array))
+    });
+    list.map(Vec::len)
+}
+
 /// Human sizes for tokens and memory: "18M", "279k", "1.4G".
 pub fn human(n: Option<i64>) -> String {
     let Some(n) = n else {
@@ -1027,5 +1095,34 @@ mod tests {
             serde_json::from_str(r#"{"summary":{"gaps":7},"gaps":[]}"#).unwrap();
         assert_eq!(coverage.gap_count(99), 7);
         assert_eq!(Coverage::default().gap_count(3), 3);
+    }
+
+    #[test]
+    fn stack_argv_matches_the_ink_version() {
+        // `triad up` and `triad down`, exactly the argv the Ink `stackUp`/`stackDown` build.
+        assert_eq!(
+            stack_args("triad.py", StackAction::Up),
+            vec!["triad.py", "up"]
+        );
+        assert_eq!(
+            stack_args("triad.py", StackAction::Down),
+            vec!["triad.py", "down"]
+        );
+    }
+
+    #[test]
+    fn finding_count_reads_the_three_shapes() {
+        let dir = std::env::temp_dir().join(format!("triad-artifacts-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("vulnerabilities.json");
+        for (body, expected) in [
+            (r#"[{"a":1},{"b":2}]"#, 2usize),
+            (r#"{"vulnerabilities":[{"a":1}]}"#, 1),
+            (r#"{"findings":[{"a":1},{"b":2},{"c":3}]}"#, 3),
+        ] {
+            std::fs::write(&path, body).unwrap();
+            assert_eq!(read_finding_count(path.to_str().unwrap()), Some(expected));
+        }
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

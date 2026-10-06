@@ -63,11 +63,16 @@ pub fn draw(frame: &mut Frame, app: &App) {
 }
 
 fn draw_footer(frame: &mut Frame, area: ratatui::layout::Rect, app: &App) {
-    // The dashboard footer stacks a submit status line above its keys, so it is rendered as
-    // a paragraph rather than the single line every other page uses.
-    if app.page() == Page::Dashboard {
-        let mut lines: Vec<Line> = Vec::new();
-        if let Some(message) = app.message() {
+    // The stack confirmation wins over a status line, and both stack above the key line,
+    // exactly as the Ink footer renders them.
+    let mut lines: Vec<Line> = Vec::new();
+    if app.page() != Page::Form {
+        if app.pending_stack_down() {
+            lines.push(Line::from(Span::styled(
+                "stop the stack? (y/n)",
+                Style::new().fg(ratatui::style::Color::Yellow),
+            )));
+        } else if let Some(message) = app.message() {
             let (prefix, colour) = match message.kind {
                 MessageKind::Err => ("✗ ", ratatui::style::Color::Red),
                 MessageKind::Ok => ("✓ ", ratatui::style::Color::Green),
@@ -78,29 +83,31 @@ fn draw_footer(frame: &mut Frame, area: ratatui::layout::Rect, app: &App) {
                 Style::new().fg(colour),
             )));
         }
-        let target = match app.target() {
-            Target::Run => "run",
-            Target::Cairn => "cairn",
-        };
-        lines.push(Line::from(vec![
-            Span::styled(
-                "n new   ↑/↓ or k/j select   tab target   enter open   r refresh   q quit   ",
-                theme::dim(),
-            ),
-            Span::styled(format!("target: {target}"), theme::accent()),
-        ]));
-        frame.render_widget(Paragraph::new(lines), area);
-        return;
     }
 
-    let mut spans = match app.page() {
-        Page::Form => vec![Span::styled(
+    match app.page() {
+        Page::Form => lines.push(Line::from(Span::styled(
             "form open: esc cancels, no other key acts",
             theme::dim(),
-        )],
+        ))),
+        Page::Dashboard => {
+            let target = match app.target() {
+                Target::Run => "run",
+                Target::Cairn => "cairn",
+            };
+            lines.push(Line::from(vec![
+                Span::styled(
+                    "n new   ↑/↓ or k/j select   tab target   enter open   r refresh   \
+                     u up   x down   c lists   q quit   ",
+                    theme::dim(),
+                ),
+                Span::styled(format!("target: {target}"), theme::accent()),
+            ]));
+        }
         Page::Cairn => {
             let mut spans: Vec<Span> = vec![Span::styled(
-                "esc close   tab pane   ↑/↓ scroll   g/G top/end   r refetch   q quit   ",
+                "esc close   tab pane   ↑/↓ scroll   g/G top/end   r refetch   \
+                 u up   x down   c lists   q quit   ",
                 theme::dim(),
             )];
             let pane = match app.cairn_pane() {
@@ -118,12 +125,12 @@ fn draw_footer(frame: &mut Frame, area: ratatui::layout::Rect, app: &App) {
                 };
                 spans.push(Span::styled(tail, theme::dim()));
             }
-            spans
+            lines.push(Line::from(spans));
         }
-        Page::Dashboard => unreachable!("the dashboard footer returns above"),
         Page::Detail => {
             let mut spans: Vec<Span> = vec![Span::styled(
-                "esc close   tab pane   ↑/↓ scroll   g/G top/end   r refetch   q quit   ",
+                "esc close   tab pane   ↑/↓ scroll   g/G top/end   r refetch   \
+                 u up   x down   c lists   q quit   ",
                 theme::dim(),
             )];
             let pane = match app.detail_pane() {
@@ -141,17 +148,17 @@ fn draw_footer(frame: &mut Frame, area: ratatui::layout::Rect, app: &App) {
                 };
                 spans.push(Span::styled(tail, theme::dim()));
             }
-            spans
+            if app.error().is_some() {
+                spans.push(Span::raw("   "));
+                spans.push(Span::styled(
+                    "last poll failed",
+                    Style::new().fg(ratatui::style::Color::Red),
+                ));
+            }
+            lines.push(Line::from(spans));
         }
-    };
-    if app.error().is_some() {
-        spans.push(Span::raw("   "));
-        spans.push(Span::styled(
-            "last poll failed",
-            Style::new().fg(ratatui::style::Color::Red),
-        ));
     }
-    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+    frame.render_widget(Paragraph::new(lines), area);
 }
 
 /// Truncate with an ellipsis or pad to a fixed width, so a row never reflows.
