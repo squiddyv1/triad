@@ -94,7 +94,7 @@ Strix's own dashboard for a live or finished run.
 | `triad setup` | one provider for both layers, written to `.env`, then offers to start |
 | `triad configure` | give Strix and the worker different providers or models |
 | `triad models` | list what a provider serves |
-| `triad up` / `triad down` | start or stop the Cairn server and the dispatcher |
+| `triad up` / `triad down` | start the Cairn server and the dispatcher, or take the stack down |
 | `triad status` | list projects, or read one graph with `--project` |
 | `triad engage` | the whole flow: project, scan, feed |
 | `triad scan` / `findings` / `feed` | those same steps on their own |

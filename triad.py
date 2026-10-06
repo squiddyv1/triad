@@ -2239,8 +2239,68 @@ def cmd_up(args):
     return 0
 
 
+def _docker_containers():
+    """Names of the triad containers Docker knows about, running or stopped."""
+    try:
+        probe = subprocess.run(["docker", "ps", "-a", "--filter", "name=triad-cairn",
+                                "--format", "{{.Names}}"],
+                               capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if probe.returncode != 0:
+        return None
+    return [line.strip() for line in probe.stdout.splitlines() if line.strip()]
+
+
+def _teardown_containers(keep):
+    """Remove (or stop) the compose containers, reporting what actually happened.
+
+    Returns 0 when they are down or were already gone, 2 when Docker is unusable or
+    compose fails. Output is captured so a failure is not mistaken for a success.
+    """
+    state = _docker_state()
+    compose = _compose_cmd() if state == "ok" else None
+    if state != "ok" or compose is None:
+        if state != "ok":
+            reason, fix = _docker_remedy(state)
+        else:                      # unreachable when state is ok; never claim success
+            reason, fix = "docker compose is not available", "./install.sh provides it"
+        _warn(f"containers left alone: {reason}")
+        print(f"     fix: {fix}")
+        return 2
+
+    names = _docker_containers()
+    if names is None:
+        _err("could not list the containers with 'docker ps'")
+        return 2
+    if not names:
+        _ok("the containers were not running")
+        return 0
+
+    verb = "stop" if keep else "down"
+    argv = ["stop", "cairn-server", "cairn-dispatcher"] if keep else ["down"]
+    try:
+        result = subprocess.run(compose + argv, cwd=str(REPO), capture_output=True,
+                                text=True, timeout=180)
+    except (OSError, subprocess.SubprocessError) as exc:
+        _err(f"docker compose {verb} could not run: {exc}")
+        return 2
+    if result.returncode != 0:
+        _err(f"docker compose {verb} failed (rc {result.returncode})")
+        for line in [l for l in (result.stderr or "").splitlines() if l.strip()][-8:]:
+            print(f"     | {line}")
+        print("     hint: inspect them with 'docker compose ps' in the repo, then retry")
+        return 2
+
+    if keep:
+        _ok(f"containers stopped, kept in place ({', '.join(names)})")
+    else:
+        _ok(f"containers and network removed ({', '.join(names)})")
+    return 0
+
+
 def cmd_down(args):
-    """Stop the dispatcher and the Cairn server. Data is kept."""
+    """Stop the dispatcher and the Cairn server and take the containers down."""
     _hdr("Stopping the stack")
     if _stop_pid(DISPATCH_PID, "the dispatcher"):
         _ok("dispatcher stopped")
@@ -2251,13 +2311,9 @@ def cmd_down(args):
         return 0
     if _stop_pid(SERVER_PID, "the host cairn serve"):
         _ok("host Cairn server stopped")
-    if _docker_ok():
-        compose = _compose_cmd()
-        if compose:
-            subprocess.run(compose + ["stop", "cairn-server", "cairn-dispatcher"],
-                           cwd=str(REPO), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    _ok("data kept in ./datas/cairn; use 'make down' to remove the containers too")
-    return 0
+    code = _teardown_containers(getattr(args, "keep_containers", False))
+    _ok("data kept in ./datas/cairn; it survives the down")
+    return code
 
 
 def _opencode_auth_path():
@@ -2433,8 +2489,11 @@ def main(argv=None):
     cf.add_argument("--worker-key", help="API key for the worker's provider")
     cf.set_defaults(func=cmd_configure)
 
-    dn = sub.add_parser("down", help="stop the dispatcher and the Cairn server")
-    dn.add_argument("--keep-server", action="store_true", help="stop only the dispatcher")
+    dn = sub.add_parser("down", help="stop the stack and remove the containers")
+    dn.add_argument("--keep-server", action="store_true",
+                    help="stop only the dispatcher, leave the Cairn server up")
+    dn.add_argument("--keep-containers", action="store_true",
+                    help="stop the containers but do not remove them")
     dn.set_defaults(func=cmd_down)
 
     au = sub.add_parser("auth", help="write the worker CLI's credentials from .env")
