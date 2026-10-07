@@ -5,13 +5,13 @@
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Sparkline, Wrap};
+use ratatui::widgets::{Paragraph, Sparkline, Wrap};
 use ratatui::Frame;
 
 use crate::app::{App, Target};
 use crate::data::{self, RunProgress, TodoDetail};
 use crate::theme;
-use crate::ui::{elide_lines, progress_bar, SEVERITY_ORDER};
+use crate::ui::{elide_lines, panel, progress_bar, SEVERITY_ORDER};
 
 pub fn draw(frame: &mut Frame, area: Rect, app: &App) {
     if let Some(error) = app.error() {
@@ -21,7 +21,7 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &App) {
     let Some(run) = app.selected_run() else {
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
-                "no runs yet — start one with `triad engage`",
+                "no runs yet; start one with `triad engage`",
                 theme::dim(),
             ))),
             area,
@@ -34,9 +34,9 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &App) {
     // and telemetry blocks at the bottom of the pane.
     let strix = strix_lines(run);
     let cairn_height: u16 = if run.project.is_some() { 6 } else { 3 };
-    // The sparkline only earns a row when there is real signal behind it: an empty or
-    // flat-zero history was Stage 1's bare `cpu` label over nothing, so both drop the row
-    // and the block is one row shorter.
+    // The sparkline only earns a row when there is signal: an empty or flat-zero history
+    // would leave a bare `cpu` label over nothing, so the row is dropped and the block is
+    // one row shorter.
     let telemetry_height: u16 = if app.cpu_signal() { 6 } else { 5 };
     // Two directory rows, four artifact rows and the border, as the Ink ARTIFACTS block.
     let artifacts_height: u16 = 8;
@@ -307,7 +307,7 @@ fn draw_cairn(frame: &mut Frame, area: Rect, run: &RunProgress, app: &App) {
         lines.push(label_line(
             "graph",
             vec![Span::styled(
-                "unavailable — Cairn is not answering",
+                "unavailable: Cairn is not answering",
                 Style::new().fg(Color::Yellow),
             )],
         ));
@@ -322,7 +322,7 @@ fn draw_cairn(frame: &mut Frame, area: Rect, run: &RunProgress, app: &App) {
         lines.push(label_line(
             "project",
             vec![
-                Span::styled("none linked — run ", theme::dim()),
+                Span::styled("none linked; run ", theme::dim()),
                 Span::styled("triad engage", theme::accent()),
                 Span::styled(" to link one", theme::dim()),
             ],
@@ -386,7 +386,7 @@ fn draw_telemetry(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(
         Sparkline::default()
             .data(app.cpu_history())
-            .style(Style::new().fg(Color::Cyan)),
+            .style(theme::accent()),
         graph_area,
     );
 }
@@ -448,7 +448,7 @@ fn process_line(label: &str, pid: Option<i64>, app: &App) -> Line<'static> {
                         cpu_text(app.proc_cpu(pid)),
                         data::human_kb(app.proc_rss(pid))
                     ),
-                    Style::new().fg(Color::Cyan),
+                    theme::accent(),
                 ),
             ],
         ),
@@ -485,7 +485,7 @@ fn bar_style(done: i64, total: i64, working: bool) -> Style {
     if total > 0 && done >= total {
         Style::new().fg(Color::Green)
     } else if working {
-        Style::new().fg(Color::Cyan)
+        theme::accent()
     } else {
         theme::dim()
     }
@@ -496,7 +496,7 @@ fn dispatcher_line(app: &App, counts: Option<(i64, i64)>) -> Line<'static> {
         Span::styled("up", theme::dim())
     } else {
         Span::styled(
-            "DOWN — nothing advances until it is up",
+            "DOWN: nothing advances until it is up",
             Style::new().fg(Color::Red),
         )
     }];
@@ -507,21 +507,6 @@ fn dispatcher_line(app: &App, counts: Option<(i64, i64)>) -> Line<'static> {
         ));
     }
     label_line("dispatcher", spans)
-}
-
-/// A bordered block whose title carries the `enter` target: `▸ ` + cyan when focused, no
-/// marker otherwise, the same treatment the Strix and Cairn modal panes use. The Ink
-/// `Detail` draws `{runFocus ? '▸ ' : '  '}STRIX` bold cyan the same way.
-fn panel(title: &'static str, focused: bool) -> Block<'static> {
-    let marker = if focused { "▸ " } else { "" };
-    let colour = if focused { Color::Cyan } else { Color::White };
-    Block::default()
-        .borders(Borders::ALL)
-        .border_style(theme::dim())
-        .title(Span::styled(
-            format!(" {marker}{title} "),
-            theme::bold().fg(colour),
-        ))
 }
 
 /// A fixed label column so values line up; an empty label indents a continuation line.

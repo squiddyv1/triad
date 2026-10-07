@@ -1,10 +1,9 @@
 //! The new-engagement form: its fields, the validation, and the argv the CLI is handed.
 //!
-//! This is a faithful port of `tui/src/control.ts` and the `Form` component in
-//! `tui/src/index.tsx`. The field names, defaults, focus order, validation wording and the
-//! `scan`/`engage` argv all match the Ink dashboard, because that version is the contract
-//! the CLI was written against. Keeping the rule in one pure module means the dashboard and
-//! the unit tests cannot drift from it.
+//! This is a faithful port of the Ink dashboard's form and control module. The field names,
+//! defaults, focus order, validation wording and the `scan`/`engage` argv all match that
+//! version, because it is the contract the CLI was written against. Keeping the rule in one
+//! pure module means the dashboard and the unit tests cannot drift from it.
 
 use std::env;
 use std::path::{Path, PathBuf};
@@ -309,7 +308,7 @@ mod tests {
     }
 
     #[test]
-    fn scan_argv_matches_the_ink_version() {
+    fn scan_argv_matches_the_cli_contract() {
         let argv = scan_args_for(
             &fields(Flow::Scan, ScanMode::Deep),
             Path::new("/w/recon-one"),
@@ -330,7 +329,7 @@ mod tests {
     }
 
     #[test]
-    fn engage_argv_matches_the_ink_version() {
+    fn engage_argv_matches_the_cli_contract() {
         let argv = engage_args_for(
             &fields(Flow::Engage, ScanMode::Standard),
             Path::new("/w/recon-one"),
@@ -355,7 +354,7 @@ mod tests {
     }
 
     #[test]
-    fn validation_matches_the_ink_wording() {
+    fn validation_matches_the_cli_wording() {
         let mut form = FormState::blank();
         assert_eq!(
             form.validation_error().as_deref(),

@@ -11,6 +11,11 @@ pub fn bold() -> Style {
     Style::new().add_modifier(Modifier::BOLD)
 }
 
+/// A block title: bold white, or bold cyan for the pane that owns the keys.
+pub fn title(focused: bool) -> Style {
+    bold().fg(if focused { Color::Cyan } else { Color::White })
+}
+
 pub fn accent() -> Style {
     Style::new().fg(Color::Cyan)
 }
@@ -49,8 +54,6 @@ pub fn project_colour(status: &str) -> Color {
     }
 }
 
-// --- the Cairn graph palette ------------------------------------------------------
-//
 // RGB rather than the terminal's 16 colours, so the canvas looks the same everywhere the
 // reference screenshots were taken. The bright half lights the origin-to-goal path; the
 // dim half recedes off-path and unclaimed work. Amber marks hints and the pulse, which is

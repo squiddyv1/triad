@@ -4,8 +4,7 @@
 //! command line can never disagree about what is running. Commands are spawned with an
 //! argv built in process, never through a shell, so no argument can be re-interpreted.
 //!
-//! `fetch_snapshot` is the only payload this stage needs. Later stages add their own
-//! `fetch_*` functions beside it, each one spawning the same interpreter and script.
+//! Each `fetch_*` function spawns the same interpreter and script and returns one payload.
 
 use std::collections::BTreeMap;
 use std::env;
@@ -22,19 +21,14 @@ use crate::form::{self, NewEngagement};
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(20);
 /// `triad up` builds and waits for the server and then the dispatcher, so the 20s default
 /// is far too short; both stack verbs still go through the CLI rather than signalling
-/// anything here, exactly as the Ink `control.ts` does.
+/// anything here, as the Ink dashboard does.
 const STACK_TIMEOUT: Duration = Duration::from_secs(240);
 const DEFAULT_PYTHON: &str = "python3";
 const DEFAULT_SCRIPT: &str = "triad.py";
 
 /// Everything a dashboard needs in one call, mirroring the `Snapshot` type in the Ink app.
-/// The DTOs stay faithful to the payload rather than being trimmed to this stage's use,
-/// so later stages read the fields the CLI already sends.
-#[allow(dead_code)]
 #[derive(Debug, Default, Clone, Deserialize)]
 pub struct Snapshot {
-    #[serde(default)]
-    pub root: String,
     #[serde(default)]
     pub cairn: Cairn,
     #[serde(default)]
@@ -61,13 +55,10 @@ pub struct Dispatcher {
     pub alive: bool,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Default, Clone, Deserialize)]
 pub struct Project {
     #[serde(default)]
     pub id: String,
-    #[serde(default)]
-    pub title: String,
     #[serde(default)]
     pub status: String,
     #[serde(default)]
@@ -105,7 +96,6 @@ impl Project {
 
 /// One Strix run, mirroring `RunProgress` in the Ink app. Nullable fields stay optional
 /// so a half-written `run.json` renders as blank rather than failing the whole snapshot.
-#[allow(dead_code)]
 #[derive(Debug, Default, Clone, Deserialize)]
 pub struct RunProgress {
     #[serde(default)]
@@ -182,7 +172,6 @@ impl RunProgress {
     }
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Default, Clone, Deserialize)]
 pub struct Agents {
     #[serde(default)]
@@ -192,12 +181,9 @@ pub struct Agents {
     #[serde(default)]
     pub running: Vec<String>,
     #[serde(default)]
-    pub waiting: i64,
-    #[serde(default)]
     pub failed: i64,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Default, Clone, Deserialize)]
 pub struct Todos {
     #[serde(default)]
@@ -206,8 +192,6 @@ pub struct Todos {
     pub done: i64,
     #[serde(default)]
     pub in_progress: i64,
-    #[serde(default)]
-    pub pending: i64,
 }
 
 #[derive(Debug, Default, Clone, Deserialize)]
@@ -220,15 +204,12 @@ pub struct TodoDetail {
     pub status: Option<String>,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Default, Clone, Deserialize)]
 pub struct Usage {
     #[serde(default)]
     pub requests: Option<i64>,
     #[serde(default)]
     pub input_tokens: Option<i64>,
-    #[serde(default)]
-    pub cached_tokens: Option<i64>,
     #[serde(default)]
     pub output_tokens: Option<i64>,
 }
@@ -386,10 +367,8 @@ pub fn fetch_snapshot() -> Result<Snapshot, DataError> {
     serde_json::from_str(&out).map_err(DataError::Json)
 }
 
-// --- driving the stack --------------------------------------------------------------
-
 /// The two stack verbs the dashboard can run, mirroring `stackUp`/`stackDown` in the Ink
-/// `control.ts`. Both go through the CLI, so the dashboard cannot invent a state change.
+/// dashboard. Both go through the CLI, so the dashboard cannot invent a state change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StackAction {
     Up,
@@ -425,8 +404,6 @@ pub fn run_stack(action: StackAction) -> Result<String, DataError> {
     let (python, args) = stack_command(action);
     run_command(&python, &args, STACK_TIMEOUT)
 }
-
-// --- starting a new engagement ------------------------------------------------------
 
 /// `triad scan --target ... --workdir ... --mode ...`, mirroring the Ink `startScan`.
 /// `triad scan` returns as soon as Strix is launched, so this resolves with its
@@ -492,12 +469,9 @@ pub fn start_engage(fields: &NewEngagement) -> Result<String, DataError> {
     Ok(log.to_string_lossy().into_owned())
 }
 
-// --- the Cairn page's two payloads ------------------------------------------------
-
 /// `graph --json`: the layout-ready project graph, mirroring `ProjectGraph` in the Ink app.
 /// `to` is null on an intent that has not concluded; that is the frontier the canvas draws
 /// as a stub reaching forward rather than a line to nowhere.
-#[allow(dead_code)]
 #[derive(Debug, Default, Clone, Deserialize)]
 pub struct ProjectGraph {
     #[serde(default)]
@@ -512,18 +486,12 @@ pub struct ProjectGraph {
     pub path: Vec<PathStep>,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Default, Clone, Deserialize)]
 pub struct GraphProject {
-    #[serde(default)]
-    pub id: String,
-    #[serde(default)]
-    pub title: String,
     #[serde(default)]
     pub status: String,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Default, Clone, Deserialize)]
 pub struct GraphNode {
     #[serde(default)]
@@ -534,26 +502,17 @@ pub struct GraphNode {
     #[serde(default)]
     pub label: String,
     #[serde(default)]
-    pub status: String,
-    #[serde(default)]
     pub hop: i64,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Default, Clone, Deserialize)]
 pub struct GraphEdge {
-    #[serde(default)]
-    pub id: String,
     #[serde(default)]
     pub from: Vec<String>,
     #[serde(default)]
     pub to: Option<String>,
     #[serde(default)]
     pub status: String,
-    #[serde(default)]
-    pub worker: Option<String>,
-    #[serde(default)]
-    pub label: String,
 }
 
 impl GraphEdge {
@@ -562,56 +521,36 @@ impl GraphEdge {
     }
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Default, Clone, Deserialize)]
 pub struct GraphCounts {
     #[serde(default)]
     pub facts: i64,
     #[serde(default)]
-    pub hints: i64,
-    #[serde(default)]
     pub intents: i64,
     #[serde(default)]
     pub open: i64,
-    #[serde(default)]
-    pub concluded: i64,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Default, Clone, Deserialize)]
 pub struct PathStep {
     #[serde(default)]
     pub fact: String,
-    #[serde(default)]
-    pub description: String,
-    #[serde(default)]
-    pub via: Option<String>,
-    #[serde(default)]
-    pub worker: Option<String>,
 }
 
 /// `cairn-logs --json`: the tail and where it came from. `source: "none"` is a normal
 /// answer, not an error: the pane explains it rather than showing an empty box.
-#[allow(dead_code)]
 #[derive(Debug, Default, Clone, Deserialize)]
 pub struct CairnLogs {
     #[serde(default)]
     pub source: String,
     #[serde(default)]
-    pub path: Option<String>,
-    #[serde(default)]
-    pub container: Option<String>,
-    #[serde(default)]
     pub lines: Vec<String>,
 }
-
-// --- the Strix modal's verbose payload --------------------------------------------
 
 /// `progress --verbose --json`: the summary `RunProgress` already carries, plus the detail
 /// a human wants -- the findings by severity with their titles, the coverage gaps, and the
 /// agent stream. Mirrors `ProgressDetail` in the Ink app; unknown keys are ignored, so the
 /// CLI can add more without breaking this view.
-#[allow(dead_code)]
 #[derive(Debug, Default, Clone, Deserialize)]
 pub struct ProgressDetail {
     #[serde(default)]
@@ -625,17 +564,9 @@ pub struct ProgressDetail {
     #[serde(default)]
     pub end_time: Option<String>,
     #[serde(default)]
-    pub turns: Option<i64>,
-    #[serde(default)]
     pub cost_usd: Option<f64>,
     #[serde(default)]
     pub findings: i64,
-    #[serde(default)]
-    pub findings_by_severity: Option<BTreeMap<String, i64>>,
-    #[serde(default)]
-    pub coverage_gaps: i64,
-    #[serde(default)]
-    pub notes: i64,
     #[serde(default)]
     pub agents: Agents,
     #[serde(default)]
@@ -645,26 +576,11 @@ pub struct ProgressDetail {
     #[serde(default)]
     pub usage: Usage,
     #[serde(default)]
-    pub agents_detail: Vec<AgentDetail>,
-    #[serde(default)]
     pub findings_detail: Vec<FindingDetail>,
     #[serde(default)]
     pub coverage: Option<Coverage>,
     #[serde(default)]
     pub messages: Vec<AgentMessage>,
-}
-
-#[allow(dead_code)]
-#[derive(Debug, Default, Clone, Deserialize)]
-pub struct AgentDetail {
-    #[serde(default)]
-    pub id: String,
-    #[serde(default)]
-    pub name: String,
-    #[serde(default)]
-    pub status: String,
-    #[serde(default)]
-    pub pending: i64,
 }
 
 #[derive(Debug, Default, Clone, Deserialize)]
@@ -675,20 +591,8 @@ pub struct FindingDetail {
     pub severity: Option<String>,
 }
 
-#[allow(dead_code)]
-#[derive(Debug, Default, Clone, Deserialize)]
-pub struct NoteDetail {
-    #[serde(default)]
-    pub id: String,
-    #[serde(default)]
-    pub title: Option<String>,
-    #[serde(default)]
-    pub agent_name: Option<String>,
-}
-
 /// Coverage is split across files: Strix's own summary and the gaps list. The summary's
 /// shape belongs to Strix, so it is read field by field and unknown keys are ignored.
-#[allow(dead_code)]
 #[derive(Debug, Default, Clone, Deserialize)]
 pub struct Coverage {
     #[serde(default)]
@@ -697,7 +601,6 @@ pub struct Coverage {
     pub gaps: Vec<serde_json::Value>,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Default, Clone, Deserialize)]
 pub struct CoverageSummary {
     #[serde(default)]
@@ -726,17 +629,12 @@ impl Coverage {
 /// One row of the agent stream, from `.state/agents.db`. `kind` is `message`,
 /// `reasoning`, `function_call` or `function_call_output`; the CLI has already clamped
 /// the text and flagged whether it truncated.
-#[allow(dead_code)]
 #[derive(Debug, Default, Clone, Deserialize)]
 pub struct AgentMessage {
     #[serde(default)]
     pub id: i64,
     #[serde(default)]
-    pub session_id: String,
-    #[serde(default)]
     pub agent_name: String,
-    #[serde(default)]
-    pub role: Option<String>,
     #[serde(default, rename = "type")]
     pub kind: String,
     #[serde(default)]
@@ -1098,7 +996,7 @@ mod tests {
     }
 
     #[test]
-    fn stack_argv_matches_the_ink_version() {
+    fn stack_argv_matches_the_cli_contract() {
         // `triad up` and `triad down`, exactly the argv the Ink `stackUp`/`stackDown` build.
         assert_eq!(
             stack_args("triad.py", StackAction::Up),

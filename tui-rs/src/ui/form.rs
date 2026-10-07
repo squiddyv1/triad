@@ -1,5 +1,5 @@
-//! The new-engagement form, ported from the `Form` component in `tui/src/index.tsx`: the
-//! five rows, the focused row's marker, the dim placeholders and the validation error line.
+//! The new-engagement form, ported from the Ink dashboard's `Form`: the five rows, the
+//! focused row's marker, the dim placeholders and the validation error line.
 
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
@@ -15,10 +15,7 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &App) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(theme::dim())
-        .title(Span::styled(
-            " NEW ENGAGEMENT ",
-            theme::bold().fg(Color::White),
-        ));
+        .title(Span::styled(" NEW ENGAGEMENT ", theme::title(false)));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 

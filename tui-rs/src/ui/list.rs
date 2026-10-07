@@ -1,7 +1,7 @@
 //! The left column: `RUNS` over `PROJECTS`, both reading straight from the snapshot.
 
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Color, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Frame;
@@ -74,14 +74,14 @@ fn draw_collapsed(frame: &mut Frame, area: Rect, app: &App) {
         .border_style(theme::dim())
         .title(Span::styled(
             format!(" {} ", fit(&runs_title, 44)),
-            theme::bold().fg(Color::White),
+            theme::title(false),
         ));
     let projects_block = Block::default()
         .borders(Borders::ALL)
         .border_style(theme::dim())
         .title(Span::styled(
             format!(" PROJECTS ({}) ", projects.len()),
-            theme::bold().fg(Color::White),
+            theme::title(false),
         ));
     let [runs_area, projects_area, rest_area] = Layout::vertical([
         Constraint::Length(2),
@@ -100,7 +100,7 @@ fn draw_runs(frame: &mut Frame, area: Rect, app: &App, runs: &[RunProgress]) {
         .border_style(theme::dim())
         .title(Span::styled(
             format!(" RUNS ({}) ", runs.len()),
-            theme::bold().fg(Color::White),
+            theme::title(false),
         ));
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -122,7 +122,7 @@ fn draw_projects(frame: &mut Frame, area: Rect, app: &App, projects: &[crate::da
         .border_style(theme::dim())
         .title(Span::styled(
             format!(" PROJECTS ({}) ", projects.len()),
-            theme::bold().fg(Color::White),
+            theme::title(false),
         ));
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -181,7 +181,7 @@ fn run_row(run: &RunProgress, selected: bool, spinner: &str) -> Line<'static> {
     }
 
     let name_style = if selected {
-        theme::bold().fg(Color::White)
+        theme::title(false)
     } else {
         Style::new()
     };

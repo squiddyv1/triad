@@ -12,8 +12,6 @@ use ratatui::text::{Line, Span};
 use crate::data::{elapsed, human, CoverageSummary, FindingDetail, ProgressDetail};
 use crate::theme;
 
-// --- the wrapping primitives ------------------------------------------------------
-
 /// One styled run of text before it becomes a ratatui `Span`. The builders work in terms
 /// of these because the wrapper has to be able to split and re-style a run without losing
 /// what style it carried.
@@ -195,8 +193,6 @@ fn wrap_into(lines: &mut Vec<Line<'static>>, spans: Vec<Cell>, width: usize) {
     lines.extend(wrap_spans(&spans, width));
 }
 
-// --- the pure data helpers --------------------------------------------------------
-
 /// Coverage is split across the summary and the rendered gap list. Return both, plus the
 /// count the heading should show: the rendered list when there is one, else the summary's
 /// own number (via `Coverage::gap_count`), else zero.
@@ -216,7 +212,6 @@ fn coverage_parts(
 /// The findings pane's one-line severity tally, ordered critical → info, unknown severities
 /// last, ties in first-seen order.
 fn severity_tally(findings: &[FindingDetail]) -> String {
-    let order = ["critical", "high", "medium", "low", "info"];
     let mut counts: Vec<(String, i64)> = Vec::new();
     for finding in findings {
         let key = finding.severity.as_deref().unwrap_or("?").to_lowercase();
@@ -226,7 +221,7 @@ fn severity_tally(findings: &[FindingDetail]) -> String {
         }
     }
     counts.sort_by_key(|(name, _)| {
-        order
+        crate::ui::SEVERITY_ORDER
             .iter()
             .position(|known| known == name)
             .map(|index| index + 1)
@@ -279,8 +274,6 @@ fn failure_re(text: &str) -> bool {
     .iter()
     .any(|needle| contains_word(&haystack, needle))
 }
-
-// --- the public builders ----------------------------------------------------------
 
 /// The Strix modal's header, clamped to `width` and to three rows: run and state with the
 /// elapsed time and pid, then agents and todos, then findings, coverage gaps, tokens and

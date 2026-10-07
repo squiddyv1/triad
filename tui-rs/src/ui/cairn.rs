@@ -10,13 +10,13 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::symbols::Marker;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::canvas::{Canvas, Context, Line as CanvasLine, Points};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
 use crate::app::{self, App, CairnPane};
 use crate::graph::{Kind, Layout as GraphLayout, PlacedNode};
 use crate::theme;
-use crate::ui::elide_line;
+use crate::ui::{elide_line, panel};
 
 /// Pulse positions along a frontier stub, so the marker visibly moves between frames.
 const PULSE_STEPS: u64 = 10;
@@ -71,7 +71,7 @@ fn graph_message(app: &App) -> Line<'static> {
     if linked.is_none() {
         return Line::from(vec![
             Span::raw("  "),
-            Span::styled("no project linked to this run — run ", theme::dim()),
+            Span::styled("no project linked to this run; run ", theme::dim()),
             Span::styled("triad engage", theme::accent()),
             Span::styled(" to link one", theme::dim()),
         ]);
@@ -209,6 +209,14 @@ fn draw_ring(ctx: &mut Context, x: f64, y: f64, color: Color) {
     ctx.draw(&Points::new(&ring, color));
 }
 
+/// The visible slice of `text` when its start column `c0` is clipped to the pane's `[x0, x1)`.
+fn clip(text: &str, c0: i32, x0: i32, x1: i32) -> String {
+    text.chars()
+        .skip((x0 - c0) as usize)
+        .take((x1 - x0) as usize)
+        .collect()
+}
+
 /// A node is a filled block of cells, at least 3x3, over the edges already drawn. The
 /// blocks are drawn here rather than on the canvas so a node always has real weight and a
 /// footprint the eye can find.
@@ -227,11 +235,7 @@ fn draw_markers(buf: &mut Buffer, area: Rect, layout: &GraphLayout) {
             if x1 <= x0 {
                 continue;
             }
-            let text: String = fill
-                .chars()
-                .skip((x0 - c0) as usize)
-                .take((x1 - x0) as usize)
-                .collect();
+            let text = clip(&fill, c0, x0, x1);
             buf.set_string(area.x + x0 as u16, area.y + y as u16, &text, style);
         }
     }
@@ -286,12 +290,7 @@ fn draw_labels(buf: &mut Buffer, area: Rect, layout: &GraphLayout) {
         if x1 <= x0 {
             continue;
         }
-        let text: String = node
-            .label
-            .chars()
-            .skip((x0 - c0) as usize)
-            .take((x1 - x0) as usize)
-            .collect();
+        let text = clip(&node.label, c0, x0, x1);
         buf.set_string(
             area.x + x0 as u16,
             area.y + r0 as u16,
@@ -441,17 +440,4 @@ fn log_style(line: &str) -> Style {
     } else {
         Style::default()
     }
-}
-
-/// A bordered panel whose title brightens when its pane owns the keys.
-fn panel(title: &str, focused: bool) -> Block<'static> {
-    let marker = if focused { "▸ " } else { "" };
-    let colour = if focused { Color::Cyan } else { Color::White };
-    Block::default()
-        .borders(Borders::ALL)
-        .border_style(theme::dim())
-        .title(Span::styled(
-            format!(" {marker}{title} "),
-            theme::bold().fg(colour),
-        ))
 }

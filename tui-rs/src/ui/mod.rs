@@ -8,10 +8,10 @@ mod header;
 mod list;
 mod strix;
 
-use ratatui::layout::{Constraint, Layout};
-use ratatui::style::Style;
+use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::Paragraph;
+use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Frame;
 
 use crate::app::{App, DetailPane, MessageKind, Page, Target};
@@ -23,6 +23,16 @@ pub const LEFT_WIDTH: u16 = 46;
 
 /// Worst first, so a critical never hides behind an info.
 pub const SEVERITY_ORDER: [&str; 5] = ["critical", "high", "medium", "low", "info"];
+
+/// The dashboard's own keys, before the shared stack/list tail.
+const DASHBOARD_KEYS: &str = "n new   ↑/↓ or k/j select   tab target   enter open   r refresh";
+/// The dashboard key line on a narrow terminal: no stack keys, condensed select hint.
+const DASHBOARD_KEYS_SHORT: &str =
+    "n new   ↑/↓ select   tab target   enter open   r refresh   c lists   q quit   ";
+/// The two modal pages share this prefix.
+const MODAL_KEYS: &str = "esc close   tab pane   ↑/↓ scroll   g/G top/end   r refetch";
+/// The stack, collapse and quit keys every page ends with.
+const STACK_KEYS: &str = "   u up   x down   c lists   q quit   ";
 
 pub fn draw(frame: &mut Frame, app: &App) {
     let [header_area, body_area, footer_area] = Layout::vertical([
@@ -37,23 +47,17 @@ pub fn draw(frame: &mut Frame, app: &App) {
     match app.page() {
         Page::Cairn => cairn::draw(frame, body_area, app),
         Page::Detail => {
-            let [left_area, modal_area] =
-                Layout::horizontal([Constraint::Length(LEFT_WIDTH), Constraint::Min(24)])
-                    .areas(body_area);
+            let (left_area, modal_area) = body_columns(body_area);
             list::draw(frame, left_area, app);
             strix::draw(frame, modal_area, app);
         }
         Page::Form => {
-            let [left_area, form_area] =
-                Layout::horizontal([Constraint::Length(LEFT_WIDTH), Constraint::Min(24)])
-                    .areas(body_area);
+            let (left_area, form_area) = body_columns(body_area);
             list::draw(frame, left_area, app);
             form::draw(frame, form_area, app);
         }
         Page::Dashboard => {
-            let [left_area, detail_area] =
-                Layout::horizontal([Constraint::Length(LEFT_WIDTH), Constraint::Min(24)])
-                    .areas(body_area);
+            let (left_area, detail_area) = body_columns(body_area);
             list::draw(frame, left_area, app);
             detail::draw(frame, detail_area, app);
         }
@@ -62,7 +66,15 @@ pub fn draw(frame: &mut Frame, app: &App) {
     draw_footer(frame, footer_area, app);
 }
 
-fn draw_footer(frame: &mut Frame, area: ratatui::layout::Rect, app: &App) {
+/// The body split every left-column page uses: the list at `LEFT_WIDTH`, the rest to the
+/// right.
+fn body_columns(body: Rect) -> (Rect, Rect) {
+    let [left, right] =
+        Layout::horizontal([Constraint::Length(LEFT_WIDTH), Constraint::Min(24)]).areas(body);
+    (left, right)
+}
+
+fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
     // The stack confirmation wins over a status line, and both stack above the key line,
     // exactly as the Ink footer renders them.
     let mut lines: Vec<Line> = Vec::new();
@@ -70,13 +82,13 @@ fn draw_footer(frame: &mut Frame, area: ratatui::layout::Rect, app: &App) {
         if app.pending_stack_down() {
             lines.push(Line::from(Span::styled(
                 "stop the stack? (y/n)",
-                Style::new().fg(ratatui::style::Color::Yellow),
+                Style::new().fg(Color::Yellow),
             )));
         } else if let Some(message) = app.message() {
             let (prefix, colour) = match message.kind {
-                MessageKind::Err => ("✗ ", ratatui::style::Color::Red),
-                MessageKind::Ok => ("✓ ", ratatui::style::Color::Green),
-                MessageKind::Info => ("  ", ratatui::style::Color::Gray),
+                MessageKind::Err => ("✗ ", Color::Red),
+                MessageKind::Ok => ("✓ ", Color::Green),
+                MessageKind::Info => ("  ", Color::Gray),
             };
             lines.push(Line::from(Span::styled(
                 format!("{prefix}{}", message.text),
@@ -95,21 +107,17 @@ fn draw_footer(frame: &mut Frame, area: ratatui::layout::Rect, app: &App) {
                 Target::Run => "run",
                 Target::Cairn => "cairn",
             };
+            let indicator = format!("target: {target}");
             lines.push(Line::from(vec![
                 Span::styled(
-                    "n new   ↑/↓ or k/j select   tab target   enter open   r refresh   \
-                     u up   x down   c lists   q quit   ",
+                    dashboard_keys(area.width as usize, indicator.chars().count()),
                     theme::dim(),
                 ),
-                Span::styled(format!("target: {target}"), theme::accent()),
+                Span::styled(indicator, theme::accent()),
             ]));
         }
         Page::Cairn => {
-            let mut spans: Vec<Span> = vec![Span::styled(
-                "esc close   tab pane   ↑/↓ scroll   g/G top/end   r refetch   \
-                 u up   x down   c lists   q quit   ",
-                theme::dim(),
-            )];
+            let mut spans: Vec<Span> = vec![Span::styled(modal_keys(), theme::dim())];
             let pane = match app.cairn_pane() {
                 crate::app::CairnPane::Graph => "graph",
                 crate::app::CairnPane::Logs => "logs",
@@ -128,11 +136,7 @@ fn draw_footer(frame: &mut Frame, area: ratatui::layout::Rect, app: &App) {
             lines.push(Line::from(spans));
         }
         Page::Detail => {
-            let mut spans: Vec<Span> = vec![Span::styled(
-                "esc close   tab pane   ↑/↓ scroll   g/G top/end   r refetch   \
-                 u up   x down   c lists   q quit   ",
-                theme::dim(),
-            )];
+            let mut spans: Vec<Span> = vec![Span::styled(modal_keys(), theme::dim())];
             let pane = match app.detail_pane() {
                 DetailPane::Findings => "findings",
                 DetailPane::Stream => "stream",
@@ -152,13 +156,46 @@ fn draw_footer(frame: &mut Frame, area: ratatui::layout::Rect, app: &App) {
                 spans.push(Span::raw("   "));
                 spans.push(Span::styled(
                     "last poll failed",
-                    Style::new().fg(ratatui::style::Color::Red),
+                    Style::new().fg(Color::Red),
                 ));
             }
             lines.push(Line::from(spans));
         }
     }
     frame.render_widget(Paragraph::new(lines), area);
+}
+
+/// The dashboard key line, condensed on a narrow terminal so the target indicator still fits.
+fn dashboard_keys(width: usize, indicator: usize) -> String {
+    let full = format!("{DASHBOARD_KEYS}{STACK_KEYS}");
+    if full.chars().count() + indicator <= width {
+        full
+    } else {
+        DASHBOARD_KEYS_SHORT.to_string()
+    }
+}
+
+/// The shared key line for the Cairn and Strix modal pages.
+fn modal_keys() -> String {
+    format!("{MODAL_KEYS}{STACK_KEYS}")
+}
+
+/// A bordered panel whose title carries the `enter` target: `▸ ` + cyan when focused, no
+/// marker otherwise, the Ink dashboard's own marker.
+pub fn panel(title: &str, focused: bool) -> Block<'static> {
+    let marker = if focused { "▸ " } else { "" };
+    Block::default()
+        .borders(Borders::ALL)
+        .border_style(theme::dim())
+        .title(Span::styled(
+            format!(" {marker}{title} "),
+            theme::title(focused),
+        ))
+}
+
+/// The usable rows inside a bordered block.
+pub fn inner_height(area: Rect) -> usize {
+    area.height.saturating_sub(2) as usize
 }
 
 /// Truncate with an ellipsis or pad to a fixed width, so a row never reflows.

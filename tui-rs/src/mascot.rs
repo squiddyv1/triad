@@ -1,6 +1,6 @@
 //! The left column's idle cartoon: one lab mascot that comes alive while a scan runs, over a
-//! fixed-size speech bubble. A direct port of the Ink reference in `tui/src/mascot.ts`, so the
-//! two dashboards draw the same figures from the same frame numbers.
+//! fixed-size speech bubble. A direct port of the Ink dashboard's mascot, so the two draw the
+//! same figures from the same frame numbers.
 //!
 //! Every figure draws exactly [`FIG_ROWS`] lines from a single deterministic frame number, so a
 //! given frame always renders the same picture and the column never jumps between labs.

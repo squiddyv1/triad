@@ -5,12 +5,13 @@
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
 use crate::app::{self, App, DetailPane};
 use crate::strix;
 use crate::theme;
+use crate::ui::{inner_height, panel};
 
 pub fn draw(frame: &mut Frame, area: Rect, app: &App) {
     let inner_width = app.detail_inner_width();
@@ -95,7 +96,7 @@ fn draw_panes(frame: &mut Frame, area: Rect, app: &App, width: usize) {
         Layout::vertical([Constraint::Length(upper), Constraint::Length(lower)]).areas(area);
 
     let findings_lines = strix::build_findings(detail, width);
-    let findings_height = findings_area.height.saturating_sub(2) as usize;
+    let findings_height = inner_height(findings_area);
     let findings_offset = app
         .detail_findings_scroll()
         .min(findings_lines.len().saturating_sub(findings_height));
@@ -115,7 +116,7 @@ fn draw_panes(frame: &mut Frame, area: Rect, app: &App, width: usize) {
     );
 
     let stream_lines = strix::build_stream(detail, width);
-    let stream_height = stream_area.height.saturating_sub(2) as usize;
+    let stream_height = inner_height(stream_area);
     let stream_offset = app
         .detail_scroll()
         .min(stream_lines.len().saturating_sub(stream_height));
@@ -158,18 +159,4 @@ fn draw_pane(
     let height = inner.height as usize;
     let window: Vec<Line<'static>> = lines.into_iter().skip(offset).take(height).collect();
     frame.render_widget(Paragraph::new(window), inner);
-}
-
-/// A bordered pane whose title brightens when its pane owns the keys, the same treatment
-/// the Cairn modal uses.
-fn panel(title: &str, focused: bool) -> Block<'static> {
-    let marker = if focused { "▸ " } else { "" };
-    let colour = if focused { Color::Cyan } else { Color::White };
-    Block::default()
-        .borders(Borders::ALL)
-        .border_style(theme::dim())
-        .title(Span::styled(
-            format!(" {marker}{title} "),
-            theme::bold().fg(colour),
-        ))
 }

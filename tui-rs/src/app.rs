@@ -28,8 +28,8 @@ const MAX_WAIT: Duration = Duration::from_millis(150);
 /// One line of the graph block is the legend, under the canvas.
 pub const CAIRN_LEGEND_ROWS: u16 = 1;
 
-/// Which page owns the body. The dashboard is the Stage 1 view; the Cairn page is the
-/// graph over the logs.
+/// Which page owns the body. The dashboard is the run list and its detail pane; the Cairn
+/// page is the graph over the logs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Page {
     Dashboard,
@@ -172,18 +172,15 @@ pub struct App {
     cpu_history: Vec<u64>,
     history_dir: String,
 
-    // --- the new-engagement form ----------------------------------------------------
     form: FormState,
     submit_rx: Option<Receiver<SubmitOutcome>>,
     message: Option<Message>,
 
-    // --- stack control (`u`/`x`) and the collapsed lists (`c`) ----------------------
     pending_stack_down: bool,
     stack_rx: Option<Receiver<SubmitOutcome>>,
     lists_collapsed: bool,
     artifacts: Artifacts,
 
-    // --- the Cairn page -------------------------------------------------------------
     page: Page,
     target: Target,
     cairn_pane: CairnPane,
@@ -206,7 +203,6 @@ pub struct App {
     term_cols: u16,
     term_rows: u16,
 
-    // --- the Strix detail modal -----------------------------------------------------
     detail: Option<ProgressDetail>,
     detail_error: Option<String>,
     detail_has_db: bool,
@@ -288,8 +284,6 @@ impl App {
             next_detail: now,
         }
     }
-
-    // --- reads the UI needs ---------------------------------------------------------
 
     pub fn snapshot(&self) -> Option<&Snapshot> {
         self.snapshot.as_ref()
@@ -417,8 +411,6 @@ impl App {
         self.proc_rss.get(&pid).copied().flatten()
     }
 
-    // --- Cairn page reads -----------------------------------------------------------
-
     pub fn page(&self) -> Page {
         self.page
     }
@@ -498,8 +490,6 @@ impl App {
         true
     }
 
-    // --- the loop's timing hooks ----------------------------------------------------
-
     /// Start a poll when one is due and none is already in flight. The fetch runs on a
     /// worker thread so a slow CLI can never freeze the keys.
     pub fn start_poll_if_due(&mut self, now: Instant) {
@@ -578,8 +568,6 @@ impl App {
     pub fn should_quit(&self) -> bool {
         self.should_quit
     }
-
-    // --- the Cairn page's fetch lifecycle -------------------------------------------
 
     /// Open the Cairn page: reset its scroll and follow state and fetch immediately, so
     /// reopen starts at the top of a fresh fetch rather than an old offset.
@@ -753,8 +741,6 @@ impl App {
         let max = logs.lines.len().saturating_sub(height);
         self.log_scroll = self.log_scroll.min(max);
     }
-
-    // --- the Strix detail modal -----------------------------------------------------
 
     pub fn detail(&self) -> Option<&ProgressDetail> {
         self.detail.as_ref()
@@ -1073,8 +1059,6 @@ impl App {
         }
     }
 
-    // --- input ----------------------------------------------------------------------
-
     pub fn on_key(&mut self, key: KeyEvent) {
         if key.kind != KeyEventKind::Press {
             return;
@@ -1246,8 +1230,6 @@ impl App {
             }
         }
     }
-
-    // --- driving the stack (`u`/`x`) -------------------------------------------------
 
     /// `u`: start the stack. No confirmation, because it only brings containers up.
     fn start_stack_up(&mut self) {
@@ -1557,8 +1539,6 @@ impl App {
         }
     }
 
-    // --- refresh internals ----------------------------------------------------------
-
     fn apply(&mut self, result: Result<Snapshot, DataError>) {
         match result {
             Ok(snapshot) => {
@@ -1709,7 +1689,7 @@ fn stack_summary(out: &str) -> String {
 
 /// Every encoding a terminal may send for backspace. DEL (`0x7f`) arrives as `Backspace`;
 /// BS (`0x08`) arrives as `Char('\u{8}')`, or as `Char('h')` with `CONTROL` on terminals
-/// that fold it into a control chord — the Kali report and this box differ exactly here.
+/// that fold it into a control chord; the Kali report and this box differ exactly here.
 /// `Delete` keeps the meaning it had beside `Backspace`.
 fn is_backspace(key: &KeyEvent) -> bool {
     match key.code {

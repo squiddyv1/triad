@@ -16,13 +16,13 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &App) {
         let live = app.runs().iter().filter(|r| r.live || r.paused).count();
         left.push(Span::styled(app.spinner_frame(), theme::accent()));
         left.push(Span::raw(" "));
-        left.push(Span::styled("TRIAD", theme::bold().fg(Color::Cyan)));
+        left.push(Span::styled("TRIAD", theme::title(true)));
         left.push(Span::styled(
             format!(" scanning · {live} live"),
             theme::dim(),
         ));
     } else {
-        left.push(Span::styled("TRIAD", theme::bold().fg(Color::Cyan)));
+        left.push(Span::styled("TRIAD", theme::title(true)));
     }
 
     let mut right: Vec<Span> = Vec::new();

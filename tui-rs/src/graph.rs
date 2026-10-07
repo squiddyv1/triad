@@ -199,7 +199,7 @@ pub fn layout(graph: &ProjectGraph, width: f64, min_height: f64) -> Layout {
             nodes: Vec::new(),
             edges: Vec::new(),
             fallback: Some(format!(
-                "graph has {n} nodes — too many to draw legibly in {}x{} cells",
+                "graph has {n} nodes: too many to draw legibly in {}x{} cells",
                 width as i32, height as i32
             )),
         };
@@ -228,7 +228,6 @@ pub fn layout(graph: &ProjectGraph, width: f64, min_height: f64) -> Layout {
         }
     }
 
-    // --- seeded force-directed relax ---------------------------------------------
     let centre = (width / 2.0, height / 2.0);
     let mut pos: Vec<(f64, f64)> = Vec::with_capacity(n);
     let seed_r = (width.min(height * 2.2) * 0.20).max(3.0);
@@ -352,7 +351,6 @@ pub fn layout(graph: &ProjectGraph, width: f64, min_height: f64) -> Layout {
     // only slides the whole drawing.
     recenter(&mut nodes, width as i32, height as i32);
 
-    // --- labels, computed from the static layout only ----------------------------
     let mut forbidden = forbidden_cells(&nodes, graph);
     let mut ink = build_ink_columns(&nodes, graph);
     // Stubs are routed after labels, so mark a provisional ray for each now. Without it a
@@ -373,7 +371,6 @@ pub fn layout(graph: &ProjectGraph, width: f64, min_height: f64) -> Layout {
     // thick stroke and never runs over its own label.
     let stub_dirs = stub_directions(&nodes, graph);
 
-    // --- edges from the final positions ------------------------------------------
     let edge_pos: HashMap<&str, (f64, f64)> = nodes
         .iter()
         .map(|node| (node.id.as_str(), (node.x, node.y)))
@@ -1083,8 +1080,6 @@ mod tests {
     fn graph() -> ProjectGraph {
         ProjectGraph {
             project: GraphProject {
-                id: "p".into(),
-                title: "t".into(),
                 status: "active".into(),
             },
             nodes: vec![
@@ -1096,11 +1091,11 @@ mod tests {
                 node("h002", "hint", 0),
             ],
             edges: vec![
-                edge("i1", &["origin"], Some("f001"), "concluded"),
-                edge("i2", &["f001"], Some("f002"), "concluded"),
-                edge("i3", &["f002"], None, "unclaimed"),
-                edge("i4", &["f001"], None, "unclaimed"),
-                edge("i5", &["origin"], None, "unclaimed"),
+                edge(&["origin"], Some("f001"), "concluded"),
+                edge(&["f001"], Some("f002"), "concluded"),
+                edge(&["f002"], None, "unclaimed"),
+                edge(&["f001"], None, "unclaimed"),
+                edge(&["origin"], None, "unclaimed"),
             ],
             counts: Default::default(),
             path: vec![],
@@ -1112,19 +1107,15 @@ mod tests {
             id: id.into(),
             kind: kind.into(),
             label: format!("{id} label text"),
-            status: kind.into(),
             hop,
         }
     }
 
-    fn edge(id: &str, from: &[&str], to: Option<&str>, status: &str) -> GraphEdge {
+    fn edge(from: &[&str], to: Option<&str>, status: &str) -> GraphEdge {
         GraphEdge {
-            id: id.into(),
             from: from.iter().map(|s| s.to_string()).collect(),
             to: to.map(str::to_string),
             status: status.into(),
-            worker: None,
-            label: id.into(),
         }
     }
 
