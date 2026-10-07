@@ -78,7 +78,7 @@ class Cairn:
             raise CairnError(f"GET {path} -> HTTP {e.code}") from None
 
     def health(self) -> list:
-        return self._call("GET", "/projects")
+        return self.list_projects()
 
     def list_projects(self) -> list:
         return self._call("GET", "/projects") or []

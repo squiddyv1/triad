@@ -90,7 +90,7 @@ hdr()  { printf '\n\033[1m%s\033[0m\n' "$*"; }
 have() { command -v "$1" >/dev/null 2>&1; }
 strix_present()  { have strix  || [ -x "$HOME/.strix/bin/strix" ]; }
 hermes_present() { have hermes || [ -x "$HOME/.local/bin/hermes" ]; }
-uv_present()     { have uv || [ -x "$HOME/.local/bin/uv" ] || [ -x "$HOME/.hermes/bin/uv" ]; }
+uv_present()     { uv_bin_path >/dev/null 2>&1; }
 # Resolve uv even when its directory is not on this shell's PATH yet, so messages
 # can name the real binary and version instead of an empty string.
 uv_bin_path() {
@@ -648,7 +648,6 @@ ensure_hermes() {
   fi
   return "$rc"   # must not be clobbered by the warn above
 }
-# Uninstall.
 if [ "$MODE" = "uninstall" ]; then
   hdr "Uninstalling"
   [ -L "$PLUGIN_DST" ] && rm -f "$PLUGIN_DST" && ok "removed plugin symlink $PLUGIN_DST"
@@ -657,7 +656,6 @@ if [ "$MODE" = "uninstall" ]; then
   warn "Strix and Hermes are separate installs; this never touches them"
   exit 0
 fi
-# Prerequisites.
 hdr "Checking prerequisites"
 FAIL=0
 
@@ -799,7 +797,6 @@ if [ "$WITH_HERMES" = 1 ] && [ "$INSTALL_METHOD" != "none" ]; then
   hdr "Hermes (optional control plane)"
   ensure_hermes || warn "Hermes is not installed; the optional control plane will be unavailable"
 fi
-# Cairn checkout + backend patch.
 hdr "Cairn (exploitation layer)"
 if [ -d "$CAIRN_DIR/.git" ]; then
   ok "using existing checkout at $CAIRN_DIR"
@@ -819,7 +816,6 @@ else
   err "upstream Cairn has probably moved. Inspect $PATCH and report it."
   exit 1
 fi
-# Config + directories.
 hdr "Configuration"
 mkdir -p "$ENGAGEMENTS"
 if [ -f "$TRIAD_HOME/.env" ]; then
@@ -853,7 +849,6 @@ else
   ok "Hermes is not installed; nothing to wire. The CLI is the normal entry point."
   ok "add it later with: ./install.sh --with-hermes"
 fi
-# CLI wrapper.
 hdr "CLI"
 mkdir -p "$BIN_DIR"
 cat > "$BIN_DIR/triad" <<EOF
@@ -871,7 +866,6 @@ case ":$PATH:" in
   *":$BIN_DIR:"*) ok "$BIN_DIR is on PATH" ;;
   *) warn "$BIN_DIR is NOT on PATH; add: export PATH=\"$BIN_DIR:\$PATH\"" ;;
 esac
-# Done.
 hdr "Next steps"
 cat <<EOF
   1. Set it up:                   triad setup

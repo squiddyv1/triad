@@ -3,7 +3,7 @@ CAIRN_REPO ?= https://github.com/oritera/Cairn.git
 HERMES_PLUGINS ?= $(HOME)/.hermes/plugins
 ENGAGEMENT ?= $(HOME)/engagements
 
-.PHONY: help bootstrap up down logs ps plugin stop-all unstop-all smoke clean
+.PHONY: help bootstrap up down logs ps plugin stop-all unstop-all clean
 
 help:
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  %-14s %s\n", $$1, $$2}'

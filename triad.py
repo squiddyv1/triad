@@ -77,7 +77,7 @@ cairn, strix = _load_plugin_modules()
 
 
 def client():
-    return cairn.Cairn(os.environ.get("CAIRN_BASE_URL", cairn.DEFAULT_BASE))
+    return cairn.Cairn(_base_url())
 
 
 def _read_roe(path, *, max_chars=1800):
@@ -1174,8 +1174,7 @@ def cmd_report(args):
     return 0
 
 
-# env, stack control and the first-run wizard: collect keys into .env, bring Cairn up, start
-# the dispatcher and report readiness. Runtime state lives in .triad/, which is gitignored.
+# Runtime state lives in .triad/, which is gitignored.
 
 STATE_DIR = REPO / ".triad"
 SERVER_PID = STATE_DIR / "server.pid"
@@ -1841,10 +1840,6 @@ def _docker_remedy(state):
     return reason, fix
 
 
-def _docker_ok():
-    return _docker_state() == "ok"
-
-
 def _log_tail(path, lines=12):
     """Last non-empty lines of a background process log."""
     try:
@@ -1970,14 +1965,26 @@ def _cairn_project():
     return None
 
 
-def _server_local_start():
-    """No-Docker fallback: run the Cairn server as a host process."""
+def _cairn_runner():
+    """uv and the Cairn project the host-mode server and dispatcher run under.
+
+    A missing uv or checkout is returned as a reason to report, not raised: `triad up`
+    shows it and falls back.
+    """
     uv = _uv_bin()
     if uv is None:
-        return None, "uv not found; ./install.sh installs it (or see https://docs.astral.sh/uv/)"
+        return None, None, "uv not found; ./install.sh installs it (or see https://docs.astral.sh/uv/)"
     project = _cairn_project()
     if project is None:
-        return None, f"no Cairn checkout at {CAIRN_DIR}; run ./install.sh"
+        return None, None, f"no Cairn checkout at {CAIRN_DIR}; run ./install.sh"
+    return uv, project, None
+
+
+def _server_local_start():
+    """No-Docker fallback: run the Cairn server as a host process."""
+    uv, project, problem = _cairn_runner()
+    if problem:
+        return None, problem
     cmd = [uv, "run", "--project", str(project),
            "cairn", "serve", "--no-access-log"]
     return _spawn(cmd, SERVER_LOG, SERVER_PID)
@@ -1990,12 +1997,9 @@ def _dispatcher_start(config):
     CLI inside it), so the host process is the default on every architecture and
     `triad up --container` opts into compose instead.
     """
-    uv = _uv_bin()
-    if uv is None:
-        return None, "uv not found; ./install.sh installs it (or see https://docs.astral.sh/uv/)"
-    project = _cairn_project()
-    if project is None:
-        return None, f"no Cairn checkout at {CAIRN_DIR}; run ./install.sh"
+    uv, project, problem = _cairn_runner()
+    if problem:
+        return None, problem
     cfg = Path(config)
     if not cfg.is_absolute():
         cfg = REPO / cfg

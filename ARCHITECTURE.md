@@ -247,8 +247,8 @@ directory), `CAIRN_DIR` (`$TRIAD_HOME/cairn`), `HERMES_HOME` (`~/.hermes`), `BIN
 `RUST_INSTALL_METHOD` to downgrade any layer to a report.
 
 Docker and uv are installed when missing, since Cairn needs both, and Rust is installed
-(via rustup) to build the dashboard. That needed care on derivatives:
-derivatives: Kali, Parrot, Mint and Pop are not distros Docker publishes packages for, so
+(via rustup) to build the dashboard. That needed care on derivative distros:
+Kali, Parrot, Mint and Pop are not distros Docker publishes packages for, so
 `get.docker.com` takes its `*)` branch, maps the distro to `debian` while keeping
 `VERSION_ID`, and writes a source for a suite that does not exist
 (`deb .../debian kali-rolling stable`). The script fails and every later `apt` call fails
