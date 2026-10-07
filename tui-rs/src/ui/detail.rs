@@ -8,7 +8,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Sparkline, Wrap};
 use ratatui::Frame;
 
-use crate::app::App;
+use crate::app::{App, Target};
 use crate::data::{self, RunProgress, TodoDetail};
 use crate::theme;
 use crate::ui::{elide_lines, progress_bar, SEVERITY_ORDER};
@@ -53,14 +53,14 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &App) {
     ])
     .areas(area);
 
-    draw_strix(frame, strix_area, strix);
+    draw_strix(frame, strix_area, strix, app.target() == Target::Run);
     draw_cairn(frame, cairn_area, run, app);
     draw_telemetry(frame, telemetry_area, app);
     draw_artifacts(frame, artifacts_area, run, app);
 }
 
 fn draw_error(frame: &mut Frame, area: Rect, error: &str) {
-    let block = panel("ERROR");
+    let block = panel("ERROR", false);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     frame.render_widget(
@@ -79,8 +79,8 @@ fn draw_error(frame: &mut Frame, area: Rect, error: &str) {
     );
 }
 
-fn draw_strix(frame: &mut Frame, area: Rect, lines: Vec<Line<'static>>) {
-    let block = panel("STRIX");
+fn draw_strix(frame: &mut Frame, area: Rect, lines: Vec<Line<'static>>, focused: bool) {
+    let block = panel("STRIX", focused);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     frame.render_widget(Paragraph::new(elide_lines(lines, inner.width)), inner);
@@ -258,7 +258,7 @@ fn strix_lines(run: &RunProgress) -> Vec<Line<'static>> {
 }
 
 fn draw_cairn(frame: &mut Frame, area: Rect, run: &RunProgress, app: &App) {
-    let block = panel("CAIRN");
+    let block = panel("CAIRN", app.target() == Target::Cairn);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -332,7 +332,7 @@ fn draw_cairn(frame: &mut Frame, area: Rect, run: &RunProgress, app: &App) {
 }
 
 fn draw_telemetry(frame: &mut Frame, area: Rect, app: &App) {
-    let block = panel("TELEMETRY");
+    let block = panel("TELEMETRY", false);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -395,7 +395,7 @@ fn draw_telemetry(frame: &mut Frame, area: Rect, app: &App) {
 /// run-detail pane carries under TELEMETRY. Paths and labels are the Ink ones: `report.md`
 /// under the engagement workdir, the other three under the run directory.
 fn draw_artifacts(frame: &mut Frame, area: Rect, run: &RunProgress, app: &App) {
-    let block = panel("ARTIFACTS");
+    let block = panel("ARTIFACTS", false);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -509,13 +509,18 @@ fn dispatcher_line(app: &App, counts: Option<(i64, i64)>) -> Line<'static> {
     label_line("dispatcher", spans)
 }
 
-fn panel(title: &'static str) -> Block<'static> {
+/// A bordered block whose title carries the `enter` target: `▸ ` + cyan when focused, no
+/// marker otherwise, the same treatment the Strix and Cairn modal panes use. The Ink
+/// `Detail` draws `{runFocus ? '▸ ' : '  '}STRIX` bold cyan the same way.
+fn panel(title: &'static str, focused: bool) -> Block<'static> {
+    let marker = if focused { "▸ " } else { "" };
+    let colour = if focused { Color::Cyan } else { Color::White };
     Block::default()
         .borders(Borders::ALL)
         .border_style(theme::dim())
         .title(Span::styled(
-            format!(" {title} "),
-            theme::bold().fg(Color::White),
+            format!(" {marker}{title} "),
+            theme::bold().fg(colour),
         ))
 }
 

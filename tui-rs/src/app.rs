@@ -1148,7 +1148,7 @@ impl App {
                 }
             }
             1..=3 => {
-                if matches!(key.code, KeyCode::Backspace | KeyCode::Delete) {
+                if is_backspace(&key) {
                     self.form.backspace();
                 } else if let KeyCode::Char(text) = key.code {
                     // A plain character edits the field; a control/alt chord is not text.
@@ -1707,12 +1707,55 @@ fn stack_summary(out: &str) -> String {
         .unwrap_or_else(|| "stack updated".to_string())
 }
 
+/// Every encoding a terminal may send for backspace. DEL (`0x7f`) arrives as `Backspace`;
+/// BS (`0x08`) arrives as `Char('\u{8}')`, or as `Char('h')` with `CONTROL` on terminals
+/// that fold it into a control chord — the Kali report and this box differ exactly here.
+/// `Delete` keeps the meaning it had beside `Backspace`.
+fn is_backspace(key: &KeyEvent) -> bool {
+    match key.code {
+        KeyCode::Backspace | KeyCode::Delete | KeyCode::Char('\u{8}') => true,
+        KeyCode::Char('h') => key.modifiers.contains(KeyModifiers::CONTROL),
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn press(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn ctrl(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::CONTROL)
+    }
+
+    #[test]
+    fn backspace_predicate_covers_all_three_encodings() {
+        // DEL (`0x7f`), BS (`0x08`) plain, and BS folded to Ctrl+H.
+        assert!(is_backspace(&press(KeyCode::Backspace)));
+        assert!(is_backspace(&press(KeyCode::Char('\u{8}'))));
+        assert!(is_backspace(&ctrl(KeyCode::Char('h'))));
+        // A plain `h` is text; any other control chord is neither text nor backspace.
+        assert!(!is_backspace(&press(KeyCode::Char('h'))));
+        assert!(!is_backspace(&ctrl(KeyCode::Char('x'))));
+    }
+
+    #[test]
+    fn ctrl_h_deletes_without_appending_a_literal_h() {
+        let mut app = App::new(Duration::from_secs(3));
+        app.on_key(press(KeyCode::Char('n')));
+        assert_eq!(app.page, Page::Form);
+        app.on_key(press(KeyCode::Char('a')));
+        app.on_key(press(KeyCode::Char('b')));
+        assert_eq!(app.form.target, "ab");
+        // Ctrl+H must delete, never append an `h`.
+        app.on_key(ctrl(KeyCode::Char('h')));
+        assert_eq!(app.form.target, "a");
+        // And the raw BS byte deletes the last character too.
+        app.on_key(press(KeyCode::Char('\u{8}')));
+        assert_eq!(app.form.target, "");
     }
 
     #[test]
